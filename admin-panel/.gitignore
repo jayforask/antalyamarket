@@ -1,0 +1,19 @@
+# Node
+node_modules/
+.next/
+out/
+.env.local
+.env.*.local
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp

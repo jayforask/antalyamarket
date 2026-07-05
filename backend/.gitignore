@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Env
+.env
+*.env
+
+# Alembic (versions kalsın, cache gitsin)
+alembic/__pycache__/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
