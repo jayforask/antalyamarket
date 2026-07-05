@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { APIProvider, Map, AdvancedMarker } from "@vis.gl/react-google-maps";
 import { RoutePolyline } from "@/components/features/maps/RoutePolyline";
-import { MOCK_ROUTES, MOCK_MARKETS_FOR_ROUTE, MOCK_REPS } from "@/lib/api/routes";
-import type { Route } from "@/types";
+import { apiClient } from "@/lib/api/client";
+import type { DailyRouteApi } from "@/lib/api/routesApi";
+import type { User, Market } from "@/types";
 import {
   Plus,
   Trash2,
@@ -16,11 +17,36 @@ import {
   Clock,
   SkipForward,
   Navigation,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
 const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
+
+// DailyRouteApi → harita için polyline uyumlu tip dönüşümü
+function toRouteForMap(r: DailyRouteApi) {
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    user: r.user,
+    date: r.date,
+    status: r.status as "draft" | "active" | "completed" | "cancelled",
+    stops: r.stops.map((s) => ({
+      id: s.id,
+      market_id: s.market_id,
+      market: s.market,
+      order_index: s.order_index,
+      status: (s.status === "rolled_over" ? "pending" : s.status) as "pending" | "visited" | "skipped",
+      distance_from_prev: undefined,
+      duration_from_prev: undefined,
+    })),
+    total_distance: undefined,
+    total_duration: undefined,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
 
 function formatDistance(meters?: number) {
   if (!meters) return "—";
@@ -37,14 +63,62 @@ type Tab = "existing" | "new";
 
 export default function RoutesPage() {
   const [tab, setTab] = useState<Tab>("existing");
-  const [selectedRoute, setSelectedRoute] = useState<Route | null>(MOCK_ROUTES[0]);
+  const [routes, setRoutes] = useState<DailyRouteApi[]>([]);
+  const [fieldReps, setFieldReps] = useState<User[]>([]);
+  const [markets, setMarkets] = useState<Market[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedRoute, setSelectedRoute] = useState<DailyRouteApi | null>(null);
 
-  // Yeni rota oluşturma state
-  const [newRepId, setNewRepId] = useState(MOCK_REPS[0].user_id);
+  // Yeni rota state
+  const [newRepId, setNewRepId] = useState("");
   const [newDate, setNewDate] = useState(new Date().toISOString().split("T")[0]);
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>([]);
   const [isOptimizing, setIsOptimizing] = useState(false);
-  const [optimizedRoute, setOptimizedRoute] = useState<Route | null>(null);
+  const [optimizedRoute, setOptimizedRoute] = useState<DailyRouteApi | null>(null);
+
+  // Temsilcileri ve bugünün rotalarını yükle
+  useEffect(() => {
+    async function load() {
+      setLoading(true);
+      try {
+        // Temsilcileri çek
+        const { data: usersData } = await apiClient.get<{ users: User[] }>("/auth/users");
+        const reps = (usersData.users ?? []).filter((u: User) => u.role === "field_rep");
+        setFieldReps(reps);
+        if (reps.length > 0) setNewRepId(reps[0].id);
+
+        // Marketleri çek (yeni rota formu için)
+        try {
+          const { data: mkts } = await apiClient.get("/markets/search", {
+            params: { page: 1, page_size: 100 },
+          });
+          setMarkets(mkts.items ?? []);
+        } catch {
+          setMarkets([]);
+        }
+
+        // Bugünkü rotaları her temsilci için çek
+        const today = new Date().toISOString().split("T")[0];
+        const routeResults = await Promise.allSettled(
+          reps.map((rep: User) =>
+            apiClient
+              .get<DailyRouteApi>(`/routes/${rep.id}/${today}`)
+              .then((r) => r.data)
+          )
+        );
+        const loaded: DailyRouteApi[] = routeResults
+          .filter((r): r is PromiseFulfilledResult<DailyRouteApi> => r.status === "fulfilled")
+          .map((r) => r.value);
+        setRoutes(loaded);
+        if (loaded.length > 0) setSelectedRoute(loaded[0]);
+      } catch {
+        // hata sessizce geçer
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
 
   function toggleMarket(id: string) {
     setSelectedMarkets((prev) =>
@@ -65,51 +139,31 @@ export default function RoutesPage() {
   }
 
   async function handleOptimize() {
-    if (selectedMarkets.length < 2) return;
+    if (selectedMarkets.length < 2 || !newRepId) return;
     setIsOptimizing(true);
+    await new Promise((r) => setTimeout(r, 800));
 
-    // Gerçek entegrasyonda Google Directions API çağrısı yapılır.
-    // Şimdilik seçili marketleri sıralayıp mock rota oluşturuyoruz.
-    await new Promise((r) => setTimeout(r, 1200));
-
-    const rep = MOCK_REPS.find((r) => r.user_id === newRepId);
+    const rep = fieldReps.find((r) => r.id === newRepId);
     const stops = selectedMarkets.map((mid, i) => {
-      const market = MOCK_MARKETS_FOR_ROUTE.find((m) => m.id === mid);
+      const market = markets.find((m) => m.id === mid);
       return {
         id: `new-s${i}`,
+        route_id: "new-r",
         market_id: mid,
         order_index: i,
         status: "pending" as const,
-        distance_from_prev: i === 0 ? 0 : Math.floor(Math.random() * 4000 + 1000),
-        duration_from_prev: i === 0 ? 0 : Math.floor(Math.random() * 600 + 240),
-        market: market
-          ? {
-              id: market.id,
-              name: market.name,
-              type: "market" as const,
-              address: market.address,
-              latitude: market.latitude,
-              longitude: market.longitude,
-              is_verified: true,
-              is_corporate: false,
-              source: "api" as const,
-              created_at: "",
-            }
-          : undefined,
+        market: market,
       };
     });
 
-    const route: Route = {
+    const route: DailyRouteApi = {
       id: "new-r",
       user_id: newRepId,
-      user: rep
-        ? { id: rep.user_id, name: rep.name, email: "", role: "field_rep", created_at: "" }
-        : undefined,
+      user: rep,
       date: newDate,
-      status: "draft",
+      status: "planned",
+      markets_per_day: stops.length,
       stops,
-      total_distance: stops.reduce((acc, s) => acc + (s.distance_from_prev ?? 0), 0),
-      total_duration: stops.reduce((acc, s) => acc + (s.duration_from_prev ?? 0), 0),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -119,6 +173,7 @@ export default function RoutesPage() {
   }
 
   const displayRoute = tab === "existing" ? selectedRoute : optimizedRoute;
+  const displayRouteForMap = displayRoute ? toRouteForMap(displayRoute) : null;
 
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-theme(spacing.16)-theme(spacing.12))]">
@@ -154,14 +209,27 @@ export default function RoutesPage() {
           {tab === "existing" ? (
             // Mevcut rotalar listesi
             <>
-              {MOCK_ROUTES.map((route) => (
-                <RouteCard
-                  key={route.id}
-                  route={route}
-                  selected={selectedRoute?.id === route.id}
-                  onSelect={() => setSelectedRoute(route)}
-                />
-              ))}
+              {loading ? (
+                <div className="flex items-center justify-center py-12 text-[var(--muted-foreground)]">
+                  <span className="w-5 h-5 border-2 border-[var(--primary)] border-t-transparent rounded-full animate-spin mr-2" />
+                  Yükleniyor...
+                </div>
+              ) : routes.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 gap-2 text-[var(--muted-foreground)]">
+                  <RouteIcon className="w-8 h-8 opacity-40" />
+                  <p className="text-sm">Bugün için rota bulunamadı</p>
+                  <p className="text-xs opacity-60">Haftalık Rotalar sayfasından rota oluşturun</p>
+                </div>
+              ) : (
+                routes.map((route) => (
+                  <RouteCard
+                    key={route.id}
+                    route={route}
+                    selected={selectedRoute?.id === route.id}
+                    onSelect={() => setSelectedRoute(route)}
+                  />
+                ))
+              )}
             </>
           ) : (
             // Yeni rota formu
@@ -178,8 +246,8 @@ export default function RoutesPage() {
                   onChange={(e) => setNewRepId(e.target.value)}
                   className="w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--background)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                 >
-                  {MOCK_REPS.map((r) => (
-                    <option key={r.user_id} value={r.user_id}>
+                  {fieldReps.map((r) => (
+                    <option key={r.id} value={r.id}>
                       {r.name}
                     </option>
                   ))}
@@ -203,29 +271,33 @@ export default function RoutesPage() {
                   Marketler ({selectedMarkets.length} seçili)
                 </label>
                 <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
-                  {MOCK_MARKETS_FOR_ROUTE.map((m) => (
-                    <button
-                      key={m.id}
-                      onClick={() => toggleMarket(m.id)}
-                      className={cn(
-                        "w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center gap-2",
-                        selectedMarkets.includes(m.id)
-                          ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)]"
-                          : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-                      )}
-                    >
-                      <Plus
+                  {markets.length === 0 ? (
+                    <p className="text-xs text-[var(--muted-foreground)] text-center py-4">Market yükleniyor...</p>
+                  ) : (
+                    markets.map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => toggleMarket(m.id)}
                         className={cn(
-                          "w-3 h-3 shrink-0 transition-transform",
-                          selectedMarkets.includes(m.id) && "rotate-45 text-[var(--primary)]"
+                          "w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center gap-2",
+                          selectedMarkets.includes(m.id)
+                            ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)]"
+                            : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
                         )}
-                      />
-                      <div className="min-w-0">
-                        <p className="font-medium truncate text-[var(--foreground)]">{m.name}</p>
-                        <p className="text-[var(--muted-foreground)] truncate">{m.address}</p>
-                      </div>
-                    </button>
-                  ))}
+                      >
+                        <Plus
+                          className={cn(
+                            "w-3 h-3 shrink-0 transition-transform",
+                            selectedMarkets.includes(m.id) && "rotate-45 text-[var(--primary)]"
+                          )}
+                        />
+                        <div className="min-w-0">
+                          <p className="font-medium truncate text-[var(--foreground)]">{m.name}</p>
+                          <p className="text-[var(--muted-foreground)] truncate">{m.address}</p>
+                        </div>
+                      </button>
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -237,7 +309,7 @@ export default function RoutesPage() {
                   </label>
                   <div className="space-y-1">
                     {selectedMarkets.map((mid, i) => {
-                      const m = MOCK_MARKETS_FOR_ROUTE.find((x) => x.id === mid);
+                      const m = markets.find((x) => x.id === mid);
                       return (
                         <div
                           key={mid}
@@ -342,7 +414,7 @@ export default function RoutesPage() {
                 >
                   {/* Haritada market pinleri (yeni rota modunda) */}
                   {tab === "new" &&
-                    MOCK_MARKETS_FOR_ROUTE.map((m) => (
+                    markets.map((m) => (
                       <AdvancedMarker
                         key={m.id}
                         position={{ lat: m.latitude, lng: m.longitude }}
@@ -363,7 +435,7 @@ export default function RoutesPage() {
                     ))}
 
                   {/* Seçili / mevcut rota çizgisi */}
-                  {displayRoute && <RoutePolyline route={displayRoute} />}
+                  {displayRouteForMap && <RoutePolyline route={displayRouteForMap} />}
                 </Map>
               </APIProvider>
             )}
@@ -382,21 +454,21 @@ export default function RoutesPage() {
                 <div className="flex gap-4 text-xs text-[var(--muted-foreground)]">
                   <span>
                     <span className="font-semibold text-[var(--foreground)]">
-                      {formatDistance(displayRoute.total_distance)}
-                    </span>{" "}
-                    toplam mesafe
-                  </span>
-                  <span>
-                    <span className="font-semibold text-[var(--foreground)]">
-                      {formatDuration(displayRoute.total_duration)}
-                    </span>{" "}
-                    tahmini süre
-                  </span>
-                  <span>
-                    <span className="font-semibold text-[var(--foreground)]">
                       {displayRoute.stops.length}
                     </span>{" "}
                     durak
+                  </span>
+                  <span
+                    className={cn(
+                      "px-2 py-0.5 rounded-full text-[10px] font-semibold",
+                      displayRoute.status === "active"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : displayRoute.status === "completed"
+                        ? "bg-blue-100 text-blue-700"
+                        : "bg-gray-100 text-gray-600"
+                    )}
+                  >
+                    {displayRoute.status === "active" ? "Aktif" : displayRoute.status === "completed" ? "Tamamlandı" : "Planlandı"}
                   </span>
                 </div>
               </div>
@@ -425,12 +497,6 @@ export default function RoutesPage() {
                           {stop.market?.name ?? "Market"}
                         </span>
                       </div>
-                      {i > 0 && (
-                        <p className="text-[var(--muted-foreground)] pl-6">
-                          +{formatDistance(stop.distance_from_prev)} ·{" "}
-                          {formatDuration(stop.duration_from_prev)}
-                        </p>
-                      )}
                       <div className="flex items-center gap-1 pl-6">
                         {stop.status === "visited" && (
                           <CheckCircle className="w-3 h-3 text-emerald-600" />
@@ -473,11 +539,11 @@ function RouteCard({
   selected,
   onSelect,
 }: {
-  route: Route;
+  route: DailyRouteApi;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const visited = route.stops.filter((s) => s.status === "visited").length;
+  const visited = route.stops.filter((s: { status: string }) => s.status === "visited").length;
   const progress = Math.round((visited / route.stops.length) * 100);
 
   return (
@@ -532,9 +598,9 @@ function RouteCard({
       </div>
 
       <div className="flex gap-3 text-xs text-[var(--muted-foreground)]">
-        <span>{formatDistance(route.total_distance)}</span>
+        <span>{route.stops.length} durak</span>
         <span>·</span>
-        <span>{formatDuration(route.total_duration)}</span>
+        <span>{route.markets_per_day} mkt/gün</span>
       </div>
     </button>
   );

@@ -1,27 +1,53 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { APIProvider, Map } from "@vis.gl/react-google-maps";
 import { RepMarker } from "@/components/features/maps/RepMarker";
 import { VisitMarker } from "@/components/features/maps/VisitMarker";
 import { RoutePolyline } from "@/components/features/maps/RoutePolyline";
-import { MOCK_REPS, MOCK_ROUTES } from "@/lib/api/routes";
-import type { Visit } from "@/types";
+import { apiClient } from "@/lib/api/client";
+import type { DailyRouteApi } from "@/lib/api/routesApi";
+import type { Visit, User } from "@/types";
 import { MapPin, Route, Users, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// Antalya merkezli mock ziyaret verileri
-const MOCK_VISITS: Visit[] = [
-  { id: "1", market_id: "1", user_id: "u1", timestamp: "2024-07-03T09:15:00Z", gps_coords: { lat: 36.884, lng: 30.695 }, is_successful: true, note: "Sipariş alındı", market: { id: "1", name: "Migros Konyaaltı", type: "market", address: "Konyaaltı Cad. No:15", latitude: 36.884, longitude: 30.695, is_verified: true, is_corporate: false, source: "api", created_at: "" }, user: { id: "u1", name: "Ahmet Yılmaz", email: "", role: "field_rep", created_at: "" } },
-  { id: "2", market_id: "2", user_id: "u2", timestamp: "2024-07-03T10:30:00Z", gps_coords: { lat: 36.862, lng: 30.731 }, is_successful: false, note: "Müşteri yoktu", market: { id: "2", name: "ŞokMarket Lara", type: "market", address: "Lara Cad. No:42", latitude: 36.862, longitude: 30.731, is_verified: true, is_corporate: false, source: "api", created_at: "" }, user: { id: "u2", name: "Fatma Kaya", email: "", role: "field_rep", created_at: "" } },
-  { id: "3", market_id: "3", user_id: "u1", timestamp: "2024-07-03T11:45:00Z", gps_coords: { lat: 36.879, lng: 30.712 }, is_successful: true, market: { id: "3", name: "BİM Muratpaşa", type: "market", address: "Muratpaşa Mah. No:5", latitude: 36.879, longitude: 30.712, is_verified: true, is_corporate: false, source: "api", created_at: "" }, user: { id: "u1", name: "Ahmet Yılmaz", email: "", role: "field_rep", created_at: "" } },
-  { id: "4", market_id: "4", user_id: "u3", timestamp: "2024-07-03T13:00:00Z", gps_coords: { lat: 36.872, lng: 30.699 }, is_successful: true, market: { id: "4", name: "A101 Kepez", type: "market", address: "Kepez Mah. No:12", latitude: 36.872, longitude: 30.699, is_verified: true, is_corporate: false, source: "api", created_at: "" }, user: { id: "u3", name: "Mehmet Demir", email: "", role: "field_rep", created_at: "" } },
-];
-
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
-
-// Antalya merkezi
 const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
+
+// DailyRouteApi → RoutePolyline için uyumlu tip dönüşümü
+function toRouteForMap(r: DailyRouteApi) {
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    user: r.user,
+    date: r.date,
+    status: r.status as "draft" | "active" | "completed" | "cancelled",
+    stops: r.stops.map((s) => ({
+      id: s.id,
+      market_id: s.market_id,
+      market: s.market,
+      order_index: s.order_index,
+      status: (s.status === "rolled_over" ? "pending" : s.status) as "pending" | "visited" | "skipped",
+      distance_from_prev: undefined,
+      duration_from_prev: undefined,
+    })),
+    total_distance: undefined,
+    total_duration: undefined,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  };
+}
+
+// RepMarker için uyumlu rep şekli
+function toRepLocation(user: User) {
+  return {
+    user_id: user.id,
+    name: user.name,
+    lat: ANTALYA_CENTER.lat + (Math.random() - 0.5) * 0.05,
+    lng: ANTALYA_CENTER.lng + (Math.random() - 0.5) * 0.05,
+    timestamp: new Date().toISOString(),
+  };
+}
 
 export default function MapsPage() {
   const [showReps, setShowReps] = useState(true);
@@ -29,17 +55,59 @@ export default function MapsPage() {
   const [showRoutes, setShowRoutes] = useState(true);
   const [selectedRep, setSelectedRep] = useState<string | null>(null);
 
+  const [fieldReps, setFieldReps] = useState<User[]>([]);
+  const [visits, setVisits] = useState<Visit[]>([]);
+  const [routes, setRoutes] = useState<DailyRouteApi[]>([]);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        // Temsilcileri çek
+        const { data: usersData } = await apiClient.get<{ users: User[] }>("/auth/users");
+        const reps = (usersData.users ?? []).filter((u: User) => u.role === "field_rep");
+        setFieldReps(reps);
+
+        // Bugünkü ziyaretleri çek
+        try {
+          const { data: visitsData } = await apiClient.get("/operations/visits", {
+            params: { page_size: 200 },
+          });
+          setVisits(visitsData.items ?? []);
+        } catch {
+          setVisits([]);
+        }
+
+        // Bugünkü rotaları her temsilci için çek
+        const today = new Date().toISOString().split("T")[0];
+        const routeResults = await Promise.allSettled(
+          reps.map((rep: User) =>
+            apiClient
+              .get<DailyRouteApi>(`/routes/${rep.id}/${today}`)
+              .then((r) => r.data)
+          )
+        );
+        const loaded: DailyRouteApi[] = routeResults
+          .filter((r): r is PromiseFulfilledResult<DailyRouteApi> => r.status === "fulfilled")
+          .map((r) => r.value);
+        setRoutes(loaded);
+      } catch {
+        // sessizce geç
+      }
+    }
+    load();
+  }, []);
+
   const filteredVisits = selectedRep
-    ? MOCK_VISITS.filter((v) => v.user_id === selectedRep)
-    : MOCK_VISITS;
+    ? visits.filter((v) => v.user_id === selectedRep)
+    : visits;
 
   const filteredRoutes = selectedRep
-    ? MOCK_ROUTES.filter((r) => r.user_id === selectedRep)
-    : MOCK_ROUTES;
+    ? routes.filter((r) => r.user_id === selectedRep)
+    : routes;
 
   const filteredReps = selectedRep
-    ? MOCK_REPS.filter((r) => r.user_id === selectedRep)
-    : MOCK_REPS;
+    ? fieldReps.filter((r) => r.id === selectedRep)
+    : fieldReps;
 
   return (
     <div className="flex flex-col h-[calc(100vh-theme(spacing.16)-theme(spacing.12))] gap-4">
@@ -104,13 +172,13 @@ export default function MapsPage() {
             >
               Tümü
             </button>
-            {MOCK_REPS.map((rep) => (
+            {fieldReps.map((rep) => (
               <button
-                key={rep.user_id}
-                onClick={() => setSelectedRep(rep.user_id === selectedRep ? null : rep.user_id)}
+                key={rep.id}
+                onClick={() => setSelectedRep(rep.id === selectedRep ? null : rep.id)}
                 className={cn(
                   "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2",
-                  selectedRep === rep.user_id
+                  selectedRep === rep.id
                     ? "bg-[var(--primary)] text-white"
                     : "hover:bg-[var(--muted)] text-[var(--foreground)]"
                 )}
@@ -169,7 +237,7 @@ export default function MapsPage() {
                 {/* Temsilci konumları */}
                 {showReps &&
                   filteredReps.map((rep) => (
-                    <RepMarker key={rep.user_id} rep={rep} />
+                    <RepMarker key={rep.id} rep={toRepLocation(rep)} />
                   ))}
 
                 {/* Ziyaret noktaları */}
@@ -181,7 +249,7 @@ export default function MapsPage() {
                 {/* Rotalar */}
                 {showRoutes &&
                   filteredRoutes.map((route) => (
-                    <RoutePolyline key={route.id} route={route} />
+                    <RoutePolyline key={route.id} route={toRouteForMap(route)} />
                   ))}
               </Map>
             </APIProvider>

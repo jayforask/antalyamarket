@@ -4,8 +4,8 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
-from geoalchemy2.functions import ST_MakePoint, ST_SetSRID
+from sqlalchemy import select, func, or_, text
+from geoalchemy2.functions import ST_MakePoint, ST_SetSRID, ST_X, ST_Y
 
 from app.core.database import get_db
 from app.models.models import Market, User
@@ -28,42 +28,49 @@ async def search_markets(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    query = select(Market)
+    # Koordinatları SQL'de çözdürüyoruz — Python'da geoalchemy2 parse hatası yok
+    base_query = select(
+        Market,
+        ST_Y(Market.location).label("lat"),
+        ST_X(Market.location).label("lng"),
+    )
 
     if q:
-        query = query.where(
+        base_query = base_query.where(
             or_(
                 Market.name.ilike(f"%{q}%"),
                 Market.address.ilike(f"%{q}%"),
             )
         )
     if type:
-        query = query.where(Market.type == type)
+        base_query = base_query.where(Market.type == type)
     if is_verified is not None:
-        query = query.where(Market.is_verified == is_verified)
+        base_query = base_query.where(Market.is_verified == is_verified)
     if is_corporate is not None:
-        query = query.where(Market.is_corporate == is_corporate)
+        base_query = base_query.where(Market.is_corporate == is_corporate)
 
     # Toplam sayı
-    count_query = select(func.count()).select_from(query.subquery())
+    count_query = select(func.count()).select_from(base_query.subquery())
     total = (await db.execute(count_query)).scalar_one()
 
     # Sayfalama
     offset = (page - 1) * page_size
-    result = await db.execute(query.offset(offset).limit(page_size))
-    markets = result.scalars().all()
+    result = await db.execute(base_query.offset(offset).limit(page_size))
+    rows = result.all()
 
-    # location geometry'den lat/lng çek
     items = []
-    for m in markets:
-        items.append(_market_to_out(m))
+    for row in rows:
+        m = row[0]
+        lat = row[1] if row[1] is not None else 0.0
+        lng = row[2] if row[2] is not None else 0.0
+        items.append(_market_to_out_coords(m, lat, lng))
 
     return PaginatedMarkets(
         items=items,
         total=total,
         page=page,
         page_size=page_size,
-        total_pages=math.ceil(total / page_size),
+        total_pages=math.ceil(total / page_size) if total > 0 else 1,
     )
 
 
@@ -85,8 +92,7 @@ async def create_market(
     )
     db.add(market)
     await db.flush()
-    await db.refresh(market)
-    return _market_to_out(market)
+    return await _fetch_market_out(market.id, db)
 
 
 @router.put("/update/{market_id}", response_model=MarketOut)
@@ -117,8 +123,7 @@ async def update_market(
         )
 
     await db.flush()
-    await db.refresh(market)
-    return _market_to_out(market)
+    return await _fetch_market_out(market_id, db)
 
 
 @router.patch("/verify/{market_id}", response_model=MarketOut)
@@ -137,8 +142,7 @@ async def verify_market(
 
     market.is_verified = True
     await db.flush()
-    await db.refresh(market)
-    return _market_to_out(market)
+    return await _fetch_market_out(market_id, db)
 
 
 @router.get("/{market_id}", response_model=MarketOut)
@@ -147,23 +151,27 @@ async def get_market(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Market).where(Market.id == market_id))
-    market = result.scalar_one_or_none()
-    if not market:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Market bulunamadı")
-    return _market_to_out(market)
+    return await _fetch_market_out(market_id, db)
 
 
-def _market_to_out(market: Market) -> MarketOut:
-    """Market modelini MarketOut schema'ya çevir — location geometry'yi lat/lng'e dönüştür."""
-    # location None ise koordinat 0 olarak döner, migration sonrası düzelir
-    lat, lng = 0.0, 0.0
-    if market.location is not None:
-        from geoalchemy2.shape import to_shape
-        point = to_shape(market.location)
-        lat = point.y
-        lng = point.x
+async def _fetch_market_out(market_id: UUID, db: AsyncSession) -> MarketOut:
+    """ID'ye göre marketi koordinatlarıyla birlikte çek."""
+    result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id == market_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Market bulunamadı")
+    m, lat, lng = row
+    return _market_to_out_coords(m, lat or 0.0, lng or 0.0)
 
+
+def _market_to_out_coords(market: Market, lat: float, lng: float) -> MarketOut:
+    """Market modeli + koordinatları MarketOut schema'ya çevirir."""
     return MarketOut(
         id=market.id,
         name=market.name,
@@ -177,3 +185,17 @@ def _market_to_out(market: Market) -> MarketOut:
         source=market.source,
         created_at=market.created_at,
     )
+
+
+def _market_to_out(market: Market) -> MarketOut:
+    """Geriye dönük uyumluluk — koordinat parse'ı try/except ile güvenli."""
+    lat, lng = 0.0, 0.0
+    if market.location is not None:
+        try:
+            from geoalchemy2.shape import to_shape
+            point = to_shape(market.location)
+            lat = point.y
+            lng = point.x
+        except Exception:
+            pass
+    return _market_to_out_coords(market, lat, lng)
