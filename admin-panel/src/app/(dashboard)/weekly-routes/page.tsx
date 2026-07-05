@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   CalendarDays,
   ChevronLeft,
@@ -23,16 +23,8 @@ import {
   type DailyRouteApi,
   type WeeklyRoutesApi,
 } from "@/lib/api/routesApi";
+import { apiClient } from "@/lib/api/client";
 import type { User } from "@/types";
-
-// ─── Mock temsilciler (gerçek entegrasyonda /users endpoint'inden gelir) ──────
-const MOCK_FIELD_REPS: User[] = [
-  { id: "u1", name: "Ahmet Yılmaz", email: "ahmet@firma.com", role: "field_rep", created_at: "" },
-  { id: "u2", name: "Fatma Kaya", email: "fatma@firma.com", role: "field_rep", created_at: "" },
-  { id: "u3", name: "Mehmet Demir", email: "mehmet@firma.com", role: "field_rep", created_at: "" },
-  { id: "u4", name: "Ayşe Çelik", email: "ayse@firma.com", role: "field_rep", created_at: "" },
-  { id: "u5", name: "Hasan Arslan", email: "hasan@firma.com", role: "field_rep", created_at: "" },
-];
 
 const DAY_NAMES = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma"];
 
@@ -67,7 +59,9 @@ function nextMonday(current: string): string {
 }
 
 export default function WeeklyRoutesPage() {
-  const [selectedRep, setSelectedRep] = useState<User>(MOCK_FIELD_REPS[0]);
+  const [fieldReps, setFieldReps] = useState<User[]>([]);
+  const [repsLoading, setRepsLoading] = useState(true);
+  const [selectedRep, setSelectedRep] = useState<User | null>(null);
   const [weekStart, setWeekStart] = useState<string>(getMondayOfWeek());
   const [marketsPerDay, setMarketsPerDay] = useState(20);
   const [weekData, setWeekData] = useState<WeeklyRoutesApi | null>(null);
@@ -75,6 +69,19 @@ export default function WeeklyRoutesPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Temsilcileri yükle
+  useEffect(() => {
+    apiClient
+      .get<{ users: User[]; total: number }>("/auth/users")
+      .then(({ data }) => {
+        const reps = data.users.filter((u) => u.role === "field_rep");
+        setFieldReps(reps);
+        if (reps.length > 0) setSelectedRep(reps[0]);
+      })
+      .catch(() => setFieldReps([]))
+      .finally(() => setRepsLoading(false));
+  }, []);
 
   // Haftanın rotalarını yükle
   const loadWeek = useCallback(async (userId: string, week: string) => {
@@ -96,6 +103,7 @@ export default function WeeklyRoutesPage() {
 
   // Haftalık rota üret
   async function handleGenerate() {
+    if (!selectedRep) return;
     setIsGenerating(true);
     setError(null);
     try {
@@ -147,25 +155,37 @@ export default function WeeklyRoutesPage() {
         {/* Temsilci seç */}
         <div>
           <p className="text-xs font-medium text-[var(--muted-foreground)] mb-2">Temsilci</p>
-          <div className="flex flex-wrap gap-2">
-            {MOCK_FIELD_REPS.map((rep) => (
-              <button
-                key={rep.id}
-                onClick={() => changeRep(rep)}
-                className={cn(
-                  "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors",
-                  selectedRep.id === rep.id
-                    ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)] font-medium"
-                    : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-                )}
-              >
-                <span className="w-5 h-5 rounded-full bg-[var(--primary)] text-white text-[10px] flex items-center justify-center font-bold shrink-0">
-                  {rep.name.charAt(0)}
-                </span>
-                {rep.name}
-              </button>
-            ))}
-          </div>
+          {repsLoading ? (
+            <div className="flex gap-2">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="h-8 w-32 bg-[var(--muted)] rounded-lg animate-pulse" />
+              ))}
+            </div>
+          ) : fieldReps.length === 0 ? (
+            <p className="text-sm text-[var(--muted-foreground)]">
+              Henüz saha temsilcisi yok. Kullanıcılar sayfasından ekleyin.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {fieldReps.map((rep) => (
+                <button
+                  key={rep.id}
+                  onClick={() => changeRep(rep)}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors",
+                    selectedRep?.id === rep.id
+                      ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)] font-medium"
+                      : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                  )}
+                >
+                  <span className="w-5 h-5 rounded-full bg-[var(--primary)] text-white text-[10px] flex items-center justify-center font-bold shrink-0">
+                    {rep.name.charAt(0)}
+                  </span>
+                  {rep.name}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Hafta seç + ayarlar */}
@@ -213,7 +233,7 @@ export default function WeeklyRoutesPage() {
 
           {/* Eylem butonları */}
           <div className="flex gap-2 ml-auto">
-            {weekData && (
+            {weekData && selectedRep && (
               <button
                 onClick={() => loadWeek(selectedRep.id, weekStart)}
                 disabled={isLoading}
