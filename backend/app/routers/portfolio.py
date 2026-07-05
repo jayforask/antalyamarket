@@ -145,7 +145,7 @@ async def assign_markets(
             user_id=a.user_id,
             market_id=a.market_id,
             assigned_at=a.assigned_at,
-            assigned_by=str(a.assigned_by) if a.assigned_by else None,
+            assigned_by=a.assigned_by,
             market=market_map.get(a.market_id),
         )
         for a in new_assignments
@@ -195,7 +195,7 @@ async def assign_single_market(
         user_id=assignment.user_id,
         market_id=assignment.market_id,
         assigned_at=assignment.assigned_at,
-        assigned_by=str(assignment.assigned_by) if assignment.assigned_by else None,
+        assigned_by=assignment.assigned_by,
         market=market_out,
     )
 
