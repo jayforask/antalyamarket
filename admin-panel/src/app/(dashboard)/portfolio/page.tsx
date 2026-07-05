@@ -114,8 +114,14 @@ export default function PortfolioPage() {
       showToast("success", `${pendingAdd.size} market portföye eklendi`);
       setPendingAdd(new Set());
       await loadPortfolio();
-    } catch {
-      showToast("error", "Atama sırasında hata oluştu");
+    } catch (err: unknown) {
+      const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } };
+      const status = axiosErr?.response?.status;
+      const detail = axiosErr?.response?.data?.detail;
+      const msg = detail
+        ? `Hata ${status}: ${detail}`
+        : `Atama sırasında hata oluştu (${status ?? "?"})`;
+      showToast("error", msg);
     } finally {
       setIsSaving(false);
     }
