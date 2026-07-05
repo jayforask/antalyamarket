@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
 from app.core.database import get_db
-from app.models.models import PerformanceSummary, User, Visit, Order
+from app.models.models import Market, PerformanceSummary, User, Visit, Order
 from app.routers.auth import get_current_user
 from app.schemas.schemas import PerformanceOut
 
@@ -67,6 +67,29 @@ async def daily_report(
         )
     ).scalar_one()
 
+    # Toplam market sayısı (kurumsal dahil)
+    total_markets = (
+        await db.execute(select(func.count(Market.id)))
+    ).scalar_one()
+
+    # Toplam temsilci sayısı
+    total_reps = (
+        await db.execute(
+            select(func.count(User.id)).where(User.role == "field_rep", User.is_active == True)  # noqa: E712
+        )
+    ).scalar_one()
+
+    # Toplam sipariş sayısı bugün
+    total_orders = (
+        await db.execute(
+            select(func.count(Order.id)).join(
+                Visit, Order.visit_id == Visit.id
+            ).where(
+                and_(Visit.timestamp >= day_start, Visit.timestamp <= day_end)
+            )
+        )
+    ).scalar_one()
+
     return {
         "date": target.isoformat(),
         "total_visits": total_visits,
@@ -74,6 +97,9 @@ async def daily_report(
         "success_rate": round(successful_visits / total_visits * 100, 1) if total_visits > 0 else 0,
         "total_revenue": float(total_revenue),
         "active_reps": active_reps,
+        "total_markets": total_markets,
+        "total_reps": total_reps,
+        "total_orders": total_orders,
     }
 
 
