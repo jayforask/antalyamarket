@@ -15,4 +15,4 @@ celery==5.4.0
 redis==5.1.0
 httpx==0.27.2
 python-dotenv==1.0.1
-ortools==9.10.9067
+ortools==9.15.6755
