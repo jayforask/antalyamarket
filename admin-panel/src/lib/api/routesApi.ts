@@ -63,20 +63,30 @@ export async function getDailyRoute(
   return data;
 }
 
-/** Haftanın Pazartesi tarihini döndür (YYYY-MM-DD) */
+/** Yerel tarihi YYYY-MM-DD formatında döndür (UTC değil) */
+function toLocalDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** Haftanın Pazartesi tarihini döndür (YYYY-MM-DD, yerel saat) */
 export function getMondayOfWeek(d: Date = new Date()): string {
   const date = new Date(d);
-  const day = date.getDay();
+  const day = date.getDay(); // 0=Pazar, 1=Pazartesi, ...
   const diff = day === 0 ? -6 : 1 - day; // Pazar=0 özel durum
   date.setDate(date.getDate() + diff);
-  return date.toISOString().split("T")[0];
+  return toLocalDateStr(date);
 }
 
 export function getWeekDates(mondayStr: string): string[] {
-  const monday = new Date(mondayStr);
+  // mondayStr → yerel tarih olarak parse et (UTC yorumlamasını önle)
+  const [y, m, dayNum] = mondayStr.split("-").map(Number);
+  const monday = new Date(y, m - 1, dayNum);
   return Array.from({ length: 5 }, (_, i) => {
     const d = new Date(monday);
     d.setDate(d.getDate() + i);
-    return d.toISOString().split("T")[0];
+    return toLocalDateStr(d);
   });
 }

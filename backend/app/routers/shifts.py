@@ -160,23 +160,26 @@ async def _reorder_route_by_gps(
     if not pending_stops:
         return
 
-    # Market koordinatlarını çek
+    # Market koordinatlarını ST_X/ST_Y ile çek
     pending_market_ids = [s.market_id for s in pending_stops]
+    from geoalchemy2.functions import ST_X, ST_Y
     mkt_result = await db.execute(
-        select(Market).where(Market.id.in_(pending_market_ids))
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id.in_(pending_market_ids))
     )
-    market_map = {m.id: m for m in mkt_result.scalars().all()}
+    coord_map: dict = {
+        row[0].id: (row[1] or current_lat, row[2] or current_lng)
+        for row in mkt_result.all()
+    }
 
     # Koordinatlı stop listesi oluştur
     coords: list[tuple] = []
     for stop in pending_stops:
-        mkt = market_map.get(stop.market_id)
-        if mkt and mkt.location is not None:
-            from geoalchemy2.shape import to_shape
-            point = to_shape(mkt.location)
-            coords.append((stop.market_id, point.y, point.x))
-        else:
-            coords.append((stop.market_id, current_lat, current_lng))  # konum bilinmiyorsa başa yakın say
+        lat, lng = coord_map.get(stop.market_id, (current_lat, current_lng))
+        coords.append((stop.market_id, lat, lng))
 
     sorted_coords = _nearest_neighbor_sort(coords, current_lat, current_lng)
     sorted_market_ids = [c[0] for c in sorted_coords]

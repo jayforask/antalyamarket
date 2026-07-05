@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from geoalchemy2.functions import ST_Distance, ST_MakePoint, ST_SetSRID
-from geoalchemy2.shape import to_shape
+from geoalchemy2.functions import ST_X, ST_Y
 
 from app.core.config import settings
 from app.core.database import get_db
@@ -38,16 +38,23 @@ async def start_visit(
 
     # Geofencing: kullanıcı koordinatı ile market koordinatı arasındaki mesafe
     if market.location is not None:
-        market_point = to_shape(market.location)
-        dist = _haversine(
-            payload.gps_lat, payload.gps_lng,
-            market_point.y, market_point.x,
+        coords_result = await db.execute(
+            select(
+                ST_Y(Market.location).label("lat"),
+                ST_X(Market.location).label("lng"),
+            ).where(Market.id == payload.market_id)
         )
-        if dist > settings.GEOFENCE_THRESHOLD_METERS:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Markete çok uzaktasınız ({dist:.0f}m). En az {settings.GEOFENCE_THRESHOLD_METERS}m içinde olmalısınız.",
+        coords_row = coords_result.one_or_none()
+        if coords_row and coords_row[0] is not None and coords_row[1] is not None:
+            dist = _haversine(
+                payload.gps_lat, payload.gps_lng,
+                coords_row[0], coords_row[1],
             )
+            if dist > settings.GEOFENCE_THRESHOLD_METERS:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Markete çok uzaktasınız ({dist:.0f}m). En az {settings.GEOFENCE_THRESHOLD_METERS}m içinde olmalısınız.",
+                )
 
     visit = Visit(
         market_id=payload.market_id,

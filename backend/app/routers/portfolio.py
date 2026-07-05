@@ -12,7 +12,7 @@ from sqlalchemy import select, delete
 from app.core.database import get_db
 from app.models.models import Market, MarketAssignment, User
 from app.routers.auth import get_current_user
-from app.routers.markets import _market_to_out
+from app.routers.markets import _market_to_out, _fetch_market_out
 from app.schemas.schemas import (
     MarketAssignmentBulkCreate,
     MarketAssignmentOut,
@@ -55,14 +55,23 @@ async def get_portfolio(
     )
     assignments = result.scalars().all()
 
-    # Market detaylarını çek
+    # Market detaylarını koordinatlarıyla birlikte SQL'den çek
     market_ids = [a.market_id for a in assignments]
     markets: list[MarketOut] = []
     if market_ids:
+        from geoalchemy2.functions import ST_X, ST_Y
         mkt_result = await db.execute(
-            select(Market).where(Market.id.in_(market_ids))
+            select(
+                Market,
+                ST_Y(Market.location).label("lat"),
+                ST_X(Market.location).label("lng"),
+            ).where(Market.id.in_(market_ids))
         )
-        markets = [_market_to_out(m) for m in mkt_result.scalars().all()]
+        from app.routers.markets import _market_to_out_coords
+        markets = [
+            _market_to_out_coords(row[0], row[1] or 0.0, row[2] or 0.0)
+            for row in mkt_result.all()
+        ]
 
     return PortfolioOut(
         user=UserOut.model_validate(user),
@@ -112,7 +121,35 @@ async def assign_markets(
     for a in new_assignments:
         await db.refresh(a)
 
-    return new_assignments
+    # Market bilgilerini koordinatlarıyla birlikte çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    from app.routers.markets import _market_to_out_coords
+    new_market_ids = [a.market_id for a in new_assignments]
+    market_map: dict = {}
+    if new_market_ids:
+        mkt_result = await db.execute(
+            select(
+                Market,
+                ST_Y(Market.location).label("lat"),
+                ST_X(Market.location).label("lng"),
+            ).where(Market.id.in_(new_market_ids))
+        )
+        market_map = {
+            row[0].id: _market_to_out_coords(row[0], row[1] or 0.0, row[2] or 0.0)
+            for row in mkt_result.all()
+        }
+
+    return [
+        MarketAssignmentOut(
+            id=a.id,
+            user_id=a.user_id,
+            market_id=a.market_id,
+            assigned_at=a.assigned_at,
+            assigned_by=str(a.assigned_by) if a.assigned_by else None,
+            market=market_map.get(a.market_id),
+        )
+        for a in new_assignments
+    ]
 
 
 # ─── Tekil market ata ────────────────────────────────────────────────────────
@@ -145,7 +182,22 @@ async def assign_single_market(
     db.add(assignment)
     await db.flush()
     await db.refresh(assignment)
-    return assignment
+
+    # Market bilgisini koordinatlarıyla çek
+    market_out = None
+    try:
+        market_out = await _fetch_market_out(market_id, db)
+    except Exception:
+        pass
+
+    return MarketAssignmentOut(
+        id=assignment.id,
+        user_id=assignment.user_id,
+        market_id=assignment.market_id,
+        assigned_at=assignment.assigned_at,
+        assigned_by=str(assignment.assigned_by) if assignment.assigned_by else None,
+        market=market_out,
+    )
 
 
 # ─── Market portföyden çıkar ─────────────────────────────────────────────────

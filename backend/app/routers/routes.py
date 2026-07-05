@@ -15,7 +15,6 @@ from app.models.models import (
     DailyRoute, Market, MarketAssignment, RouteStop, User,
 )
 from app.routers.auth import get_current_user
-from app.routers.markets import _market_to_out
 from app.schemas.schemas import (
     DailyRouteOut,
     GenerateWeeklyRoutesRequest,
@@ -173,13 +172,20 @@ async def generate_weekly_routes(
     )
     all_markets = mkt_result.scalars().all()
 
-    # Koordinatsız marketleri filtrele
+    # Koordinatsız marketleri filtrele — ST_X/ST_Y ile koordinat çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    mkt_coords_result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id.in_(market_ids))
+    )
     markets_with_coords: list[tuple[UUID, float, float]] = []
-    for m in all_markets:
-        if m.location is not None:
-            from geoalchemy2.shape import to_shape
-            point = to_shape(m.location)
-            markets_with_coords.append((m.id, point.y, point.x))
+    for row in mkt_coords_result.all():
+        m, lat, lng = row[0], row[1], row[2]
+        if lat is not None and lng is not None:
+            markets_with_coords.append((m.id, lat, lng))
 
     if not markets_with_coords:
         raise HTTPException(status_code=400, detail="Portföydeki marketlerin koordinat bilgisi yok")
@@ -358,22 +364,25 @@ async def reorder_today_route(
 
     # Bekleyen durakların market koordinatlarını çek
     pending_market_ids = [s.market_id for s in pending_stops]
-    mkt_result = await db.execute(
-        select(Market).where(Market.id.in_(pending_market_ids))
-    )
-    market_map: dict[UUID, Market] = {m.id: m for m in mkt_result.scalars().all()}
 
-    # Koordinatlı durakları hazırla
+    # Koordinatlı durakları hazırla — ST_X/ST_Y ile koordinat çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    coords_result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id.in_(pending_market_ids))
+    )
+    coord_map: dict[UUID, tuple[float, float]] = {
+        row[0].id: (row[1] or 0.0, row[2] or 0.0)
+        for row in coords_result.all()
+    }
+
     pending_with_coords: list[tuple[RouteStop, float, float]] = []
     for stop in pending_stops:
-        mkt = market_map.get(stop.market_id)
-        if mkt and mkt.location is not None:
-            from geoalchemy2.shape import to_shape
-            point = to_shape(mkt.location)
-            pending_with_coords.append((stop, point.y, point.x))
-        else:
-            # Koordinatsız duraklar sona eklenir
-            pending_with_coords.append((stop, 0.0, 0.0))
+        lat, lng = coord_map.get(stop.market_id, (0.0, 0.0))
+        pending_with_coords.append((stop, lat, lng))
 
     # Nearest Neighbor ile sırala
     coords_only = [(s.market_id, lat, lng) for s, lat, lng in pending_with_coords]
@@ -425,9 +434,20 @@ async def skip_stop(
     await db.flush()
     await db.refresh(stop)
 
-    # Market bilgisini ekle
-    mkt_result = await db.execute(select(Market).where(Market.id == stop.market_id))
-    mkt = mkt_result.scalar_one_or_none()
+    # Market bilgisini koordinatlarıyla birlikte çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    from app.routers.markets import _market_to_out_coords
+    mkt_result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id == stop.market_id)
+    )
+    mkt_row = mkt_result.one_or_none()
+    market_out = None
+    if mkt_row:
+        market_out = _market_to_out_coords(mkt_row[0], mkt_row[1] or 0.0, mkt_row[2] or 0.0)
 
     return RouteStopOut(
         id=stop.id,
@@ -437,7 +457,7 @@ async def skip_stop(
         status=stop.status,
         rolled_from_date=stop.rolled_from_date,
         visited_at=stop.visited_at,
-        market=_market_to_out(mkt) if mkt else None,
+        market=market_out,
     )
 
 
@@ -471,19 +491,41 @@ async def get_daily_route(
 
 async def _build_route_out(route_id: UUID, db: AsyncSession) -> DailyRouteOut:
     """DailyRoute + RouteStop + Market bilgilerini birleştirip DailyRouteOut döndür."""
-    result = await db.execute(
+    from geoalchemy2.functions import ST_X, ST_Y
+    from app.routers.markets import _market_to_out_coords
+
+    # Rota + user
+    route_result = await db.execute(
         select(DailyRoute)
-        .options(selectinload(DailyRoute.stops).selectinload(RouteStop.market))
         .options(selectinload(DailyRoute.user))
+        .options(selectinload(DailyRoute.stops))
         .where(DailyRoute.id == route_id)
     )
-    route = result.scalar_one_or_none()
+    route = route_result.scalar_one_or_none()
     if not route:
         raise HTTPException(status_code=404, detail="Rota bulunamadı")
 
+    # Durağa ait market ID'lerini topla
+    stop_map = {s.market_id: s for s in route.stops}
+    market_ids = [s.market_id for s in route.stops]
+
+    # Market koordinatlarını SQL'den çek
+    market_out_map = {}
+    if market_ids:
+        mkt_result = await db.execute(
+            select(
+                Market,
+                ST_Y(Market.location).label("lat"),
+                ST_X(Market.location).label("lng"),
+            ).where(Market.id.in_(market_ids))
+        )
+        for row in mkt_result.all():
+            market_out_map[row[0].id] = _market_to_out_coords(
+                row[0], row[1] or 0.0, row[2] or 0.0
+            )
+
     stops_out = []
     for stop in sorted(route.stops, key=lambda s: s.order_index):
-        market_out = _market_to_out(stop.market) if stop.market else None
         stops_out.append(
             RouteStopOut(
                 id=stop.id,
@@ -493,7 +535,7 @@ async def _build_route_out(route_id: UUID, db: AsyncSession) -> DailyRouteOut:
                 status=stop.status,
                 rolled_from_date=stop.rolled_from_date,
                 visited_at=stop.visited_at,
-                market=market_out,
+                market=market_out_map.get(stop.market_id),
             )
         )
 
