@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { Search, Plus, Shield, User, BarChart2 } from "lucide-react";
-import { cn, formatDate, formatDuration } from "@/lib/utils";
-import type { User as UserType, UserRole } from "@/types";
+import { useState, useEffect, useCallback } from "react";
+import { Search, Plus, Shield, User, Trash2, X } from "lucide-react";
+import { cn, formatDate } from "@/lib/utils";
+import { apiClient } from "@/lib/api/client";
+import type { UserRole } from "@/types";
 
 const ROLE_LABELS: Record<UserRole, string> = {
   admin: "Yönetici",
@@ -17,28 +18,44 @@ const ROLE_COLORS: Record<UserRole, string> = {
   field_rep: "bg-emerald-50 text-emerald-700",
 };
 
-interface UserWithStats extends UserType {
-  total_visits_today: number;
-  efficiency_score: number;
-  shift_duration: number; // minutes
+interface UserData {
+  id: string;
+  name: string;
+  email: string;
+  role: UserRole;
   is_active: boolean;
+  created_at: string;
 }
 
-const MOCK_USERS: UserWithStats[] = [
-  { id: "u1", name: "Ahmet Yılmaz", email: "ahmet@firma.com", role: "field_rep", created_at: "2024-01-15T00:00:00Z", total_visits_today: 24, efficiency_score: 94, shift_duration: 480, is_active: true },
-  { id: "u2", name: "Fatma Kaya", email: "fatma@firma.com", role: "field_rep", created_at: "2024-02-01T00:00:00Z", total_visits_today: 21, efficiency_score: 88, shift_duration: 450, is_active: true },
-  { id: "u3", name: "Mehmet Demir", email: "mehmet@firma.com", role: "field_rep", created_at: "2024-02-15T00:00:00Z", total_visits_today: 19, efficiency_score: 82, shift_duration: 420, is_active: true },
-  { id: "u4", name: "Ayşe Çelik", email: "ayse@firma.com", role: "field_rep", created_at: "2024-03-01T00:00:00Z", total_visits_today: 0, efficiency_score: 76, shift_duration: 0, is_active: false },
-  { id: "u5", name: "Hasan Arslan", email: "hasan@firma.com", role: "field_rep", created_at: "2024-03-10T00:00:00Z", total_visits_today: 15, efficiency_score: 70, shift_duration: 360, is_active: true },
-  { id: "u6", name: "Admin Kullanıcı", email: "admin@firma.com", role: "admin", created_at: "2023-12-01T00:00:00Z", total_visits_today: 0, efficiency_score: 0, shift_duration: 0, is_active: true },
-];
+const EMPTY_FORM = { name: "", email: "", password: "", role: "field_rep" as UserRole };
 
 export default function UsersPage() {
+  const [users, setUsers] = useState<UserData[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
-  const [selectedUser, setSelectedUser] = useState<UserWithStats | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [formError, setFormError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const filtered = MOCK_USERS.filter((u) => {
+  const fetchUsers = useCallback(async () => {
+    try {
+      setLoading(true);
+      const { data } = await apiClient.get("/auth/users");
+      setUsers(data.users);
+    } catch {
+      setError("Kullanıcılar yüklenemedi.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchUsers(); }, [fetchUsers]);
+
+  const filtered = users.filter((u) => {
     const matchSearch =
       !search ||
       u.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -47,7 +64,41 @@ export default function UsersPage() {
     return matchSearch && matchRole;
   });
 
-  const activeCount = MOCK_USERS.filter((u) => u.is_active && u.role === "field_rep").length;
+  const activeCount = users.filter((u) => u.is_active && u.role === "field_rep").length;
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setFormError("");
+    if (!form.name || !form.email || !form.password) {
+      setFormError("Tüm alanları doldurun.");
+      return;
+    }
+    try {
+      setSubmitting(true);
+      await apiClient.post("/auth/register", form);
+      setShowForm(false);
+      setForm(EMPTY_FORM);
+      await fetchUsers();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setFormError(msg || "Kullanıcı oluşturulamadı.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm("Bu kullanıcıyı silmek istediğinize emin misiniz?")) return;
+    try {
+      setDeletingId(id);
+      await apiClient.delete(`/auth/users/${id}`);
+      await fetchUsers();
+    } catch {
+      alert("Kullanıcı silinemedi.");
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <div className="space-y-5 max-w-screen-xl">
@@ -58,7 +109,10 @@ export default function UsersPage() {
             {filtered.length} kullanıcı · {activeCount} aktif saha temsilcisi
           </p>
         </div>
-        <button className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary)] text-white text-sm font-medium hover:opacity-90 transition-opacity">
+        <button
+          onClick={() => { setShowForm(true); setFormError(""); setForm(EMPTY_FORM); }}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--primary)] text-white text-sm font-medium hover:opacity-90 transition-opacity"
+        >
           <Plus className="w-4 h-4" aria-hidden="true" />
           Yeni Kullanıcı
         </button>
@@ -89,110 +143,172 @@ export default function UsersPage() {
         </select>
       </div>
 
-      {/* Kullanıcı kartları */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filtered.map((user) => (
-          <div
-            key={user.id}
-            className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
-            onClick={() => setSelectedUser(user)}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => e.key === "Enter" && setSelectedUser(user)}
-            aria-label={`${user.name} kullanıcı kartı`}
-          >
-            <div className="flex items-start gap-3">
-              {/* Avatar */}
-              <div className="relative shrink-0">
-                <div className="w-10 h-10 rounded-full bg-[var(--primary)] flex items-center justify-center text-white font-bold">
-                  {user.name.charAt(0)}
-                </div>
-                {user.role === "field_rep" && (
-                  <span
-                    className={cn(
-                      "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--card)]",
-                      user.is_active ? "bg-emerald-500" : "bg-zinc-400"
-                    )}
-                    aria-hidden="true"
-                  />
-                )}
-              </div>
+      {/* Yükleme / Hata */}
+      {loading && <p className="text-sm text-[var(--muted-foreground)]">Yükleniyor...</p>}
+      {error && <p className="text-sm text-red-500">{error}</p>}
 
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-medium text-[var(--foreground)] truncate">{user.name}</span>
-                  <span className={cn("px-1.5 py-0.5 rounded text-xs font-medium shrink-0", ROLE_COLORS[user.role])}>
-                    {ROLE_LABELS[user.role]}
-                  </span>
+      {/* Kullanıcı kartları */}
+      {!loading && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filtered.map((user) => (
+            <div
+              key={user.id}
+              className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow"
+            >
+              <div className="flex items-start gap-3">
+                <div className="relative shrink-0">
+                  <div className="w-10 h-10 rounded-full bg-[var(--primary)] flex items-center justify-center text-white font-bold">
+                    {user.name.charAt(0)}
+                  </div>
+                  {user.role === "field_rep" && (
+                    <span
+                      className={cn(
+                        "absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[var(--card)]",
+                        user.is_active ? "bg-emerald-500" : "bg-zinc-400"
+                      )}
+                      aria-hidden="true"
+                    />
+                  )}
                 </div>
-                <p className="text-xs text-[var(--muted-foreground)] truncate mt-0.5">{user.email}</p>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-medium text-[var(--foreground)] truncate">{user.name}</span>
+                    <span className={cn("px-1.5 py-0.5 rounded text-xs font-medium shrink-0", ROLE_COLORS[user.role])}>
+                      {ROLE_LABELS[user.role]}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[var(--muted-foreground)] truncate mt-0.5">{user.email}</p>
+                  <div className="flex items-center gap-2 mt-1 text-xs text-[var(--muted-foreground)]">
+                    <Shield className="w-3 h-3" aria-hidden="true" />
+                    <span>{formatDate(user.created_at)}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleDelete(user.id)}
+                  disabled={deletingId === user.id}
+                  className="shrink-0 p-1.5 rounded-lg text-[var(--muted-foreground)] hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-40"
+                  aria-label={`${user.name} kullanıcısını sil`}
+                >
+                  <Trash2 className="w-4 h-4" aria-hidden="true" />
+                </button>
               </div>
             </div>
+          ))}
+          {filtered.length === 0 && (
+            <p className="col-span-3 text-center text-sm text-[var(--muted-foreground)] py-8">
+              Kullanıcı bulunamadı.
+            </p>
+          )}
+        </div>
+      )}
 
-            {user.role === "field_rep" && (
-              <div className="mt-3 pt-3 border-t border-[var(--border)] grid grid-cols-3 gap-2 text-center">
-                <div>
-                  <p className="text-lg font-bold text-[var(--foreground)]">{user.total_visits_today}</p>
-                  <p className="text-xs text-[var(--muted-foreground)]">Ziyaret</p>
-                </div>
-                <div>
-                  <p className="text-lg font-bold text-[var(--foreground)]">{user.efficiency_score}</p>
-                  <p className="text-xs text-[var(--muted-foreground)]">Skor</p>
-                </div>
-                <div>
-                  <p className="text-lg font-bold text-[var(--foreground)]">{formatDuration(user.shift_duration)}</p>
-                  <p className="text-xs text-[var(--muted-foreground)]">Mesai</p>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Detay Modal */}
-      {selectedUser && (
+      {/* Yeni Kullanıcı Formu Modal */}
+      {showForm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-          onClick={() => setSelectedUser(null)}
+          onClick={() => setShowForm(false)}
           role="dialog"
           aria-modal="true"
-          aria-label="Kullanıcı detayı"
+          aria-labelledby="new-user-title"
         >
           <div
             className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 w-full max-w-sm shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-start justify-between mb-5">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-[var(--primary)] flex items-center justify-center text-white text-lg font-bold">
-                  {selectedUser.name.charAt(0)}
-                </div>
-                <div>
-                  <h3 className="font-semibold text-[var(--foreground)]">{selectedUser.name}</h3>
-                  <span className={cn("px-2 py-0.5 rounded text-xs font-medium", ROLE_COLORS[selectedUser.role])}>
-                    {ROLE_LABELS[selectedUser.role]}
-                  </span>
-                </div>
-              </div>
-              <button onClick={() => setSelectedUser(null)} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]" aria-label="Kapat">✕</button>
+            <div className="flex items-center justify-between mb-5">
+              <h3 id="new-user-title" className="font-semibold text-[var(--foreground)]">
+                Yeni Kullanıcı Oluştur
+              </h3>
+              <button
+                onClick={() => setShowForm(false)}
+                className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+                aria-label="Kapat"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div className="space-y-2.5 text-sm">
-              <div className="flex items-center gap-2 text-[var(--muted-foreground)]">
-                <User className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>{selectedUser.email}</span>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-[var(--foreground)] mb-1" htmlFor="new-name">
+                  Ad Soyad
+                </label>
+                <input
+                  id="new-name"
+                  type="text"
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--background)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  placeholder="Ahmet Yılmaz"
+                  required
+                />
               </div>
-              <div className="flex items-center gap-2 text-[var(--muted-foreground)]">
-                <Shield className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>Kayıt: {formatDate(selectedUser.created_at)}</span>
+              <div>
+                <label className="block text-sm font-medium text-[var(--foreground)] mb-1" htmlFor="new-email">
+                  E-posta
+                </label>
+                <input
+                  id="new-email"
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--background)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  placeholder="ahmet@firma.com"
+                  required
+                />
               </div>
-              {selectedUser.role === "field_rep" && (
-                <div className="flex items-center gap-2 text-[var(--muted-foreground)]">
-                  <BarChart2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span>Bugün {selectedUser.total_visits_today} ziyaret · Skor: {selectedUser.efficiency_score}</span>
-                </div>
+              <div>
+                <label className="block text-sm font-medium text-[var(--foreground)] mb-1" htmlFor="new-password">
+                  Şifre
+                </label>
+                <input
+                  id="new-password"
+                  type="password"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  className="w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--background)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  placeholder="En az 6 karakter"
+                  required
+                  minLength={6}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[var(--foreground)] mb-1" htmlFor="new-role">
+                  Rol
+                </label>
+                <select
+                  id="new-role"
+                  value={form.role}
+                  onChange={(e) => setForm({ ...form, role: e.target.value as UserRole })}
+                  className="w-full px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--background)] text-sm text-[var(--foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                >
+                  {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {formError && (
+                <p className="text-sm text-red-500">{formError}</p>
               )}
-            </div>
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowForm(false)}
+                  className="flex-1 px-4 py-2 rounded-lg border border-[var(--border)] text-sm font-medium text-[var(--foreground)] hover:bg-[var(--background)] transition-colors"
+                >
+                  İptal
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="flex-1 px-4 py-2 rounded-lg bg-[var(--primary)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+                >
+                  {submitting ? "Oluşturuluyor..." : "Oluştur"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

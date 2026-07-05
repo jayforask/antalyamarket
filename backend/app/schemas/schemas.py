@@ -24,14 +24,27 @@ class RefreshRequest(BaseModel):
 
 # ─── User ────────────────────────────────────────────────────────────────────
 
+class UserCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    role: str = "field_rep"  # admin | manager | field_rep
+
+
 class UserOut(BaseModel):
     id: UUID
     name: str
     email: EmailStr
     role: str
+    is_active: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class UserListOut(BaseModel):
+    users: List["UserOut"]
+    total: int
 
 
 # ─── Market ──────────────────────────────────────────────────────────────────
