@@ -5,22 +5,29 @@ import { Search, Briefcase, X, CheckCircle, Loader2, Trash2, UserCheck } from "l
 import { cn } from "@/lib/utils";
 import { searchMarketsApi } from "@/lib/api/markets";
 import { getPortfolio, assignMarkets, removeMarket, clearPortfolio } from "@/lib/api/portfolio";
+import { apiClient } from "@/lib/api/client";
 import type { Market, User } from "@/types";
-
-// ─── Mock kullanıcılar (gerçek entegrasyonda /auth/users endpoint'i ile değişir) ──
-const MOCK_FIELD_REPS: User[] = [
-  { id: "u1", name: "Ahmet Yılmaz", email: "ahmet@firma.com", role: "field_rep", created_at: "" },
-  { id: "u2", name: "Fatma Kaya", email: "fatma@firma.com", role: "field_rep", created_at: "" },
-  { id: "u3", name: "Mehmet Demir", email: "mehmet@firma.com", role: "field_rep", created_at: "" },
-  { id: "u4", name: "Ayşe Çelik", email: "ayse@firma.com", role: "field_rep", created_at: "" },
-  { id: "u5", name: "Hasan Arslan", email: "hasan@firma.com", role: "field_rep", created_at: "" },
-];
 
 type Tab = "assign" | "portfolio";
 
 export default function PortfolioPage() {
   const [tab, setTab] = useState<Tab>("assign");
-  const [selectedRep, setSelectedRep] = useState<User>(MOCK_FIELD_REPS[0]);
+  const [fieldReps, setFieldReps] = useState<User[]>([]);
+  const [repsLoading, setRepsLoading] = useState(true);
+  const [selectedRep, setSelectedRep] = useState<User | null>(null);
+
+  // Temsilcileri API'den yükle
+  useEffect(() => {
+    apiClient
+      .get<{ users: User[]; total: number }>("/auth/users")
+      .then(({ data }) => {
+        const reps = data.users.filter((u) => u.role === "field_rep");
+        setFieldReps(reps);
+        if (reps.length > 0) setSelectedRep(reps[0]);
+      })
+      .catch(() => setFieldReps([]))
+      .finally(() => setRepsLoading(false));
+  }, []);
 
   // Market arama state
   const [search, setSearch] = useState("");
@@ -39,17 +46,17 @@ export default function PortfolioPage() {
 
   // ─── Portföyü yükle ──────────────────────────────────────────────────────────
   const loadPortfolio = useCallback(async () => {
+    if (!selectedRep) return;
     setIsLoadingPortfolio(true);
     try {
       const data = await getPortfolio(selectedRep.id);
       setPortfolio(data.markets);
     } catch {
-      // Backend bağlı değilse boş portföy göster
       setPortfolio([]);
     } finally {
       setIsLoadingPortfolio(false);
     }
-  }, [selectedRep.id]);
+  }, [selectedRep]);
 
   useEffect(() => {
     loadPortfolio();
@@ -100,7 +107,7 @@ export default function PortfolioPage() {
 
   // ─── Portföye ekle (kaydet) ──────────────────────────────────────────────────
   async function handleSaveAssign() {
-    if (pendingAdd.size === 0) return;
+    if (pendingAdd.size === 0 || !selectedRep) return;
     setIsSaving(true);
     try {
       await assignMarkets(selectedRep.id, Array.from(pendingAdd));
@@ -116,6 +123,7 @@ export default function PortfolioPage() {
 
   // ─── Portföyden çıkar ────────────────────────────────────────────────────────
   async function handleRemove(marketId: string) {
+    if (!selectedRep) return;
     try {
       await removeMarket(selectedRep.id, marketId);
       setPortfolio((prev) => prev.filter((m) => m.id !== marketId));
@@ -127,6 +135,7 @@ export default function PortfolioPage() {
 
   // ─── Portföyü temizle ────────────────────────────────────────────────────────
   async function handleClear() {
+    if (!selectedRep) return;
     if (!confirm(`${selectedRep.name} temsilcisinin tüm portföyü silinecek. Onaylıyor musunuz?`)) return;
     try {
       await clearPortfolio(selectedRep.id);
@@ -164,25 +173,37 @@ export default function PortfolioPage() {
       {/* Temsilci seç */}
       <div className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4">
         <p className="text-xs font-medium text-[var(--muted-foreground)] mb-2">Temsilci Seç</p>
-        <div className="flex flex-wrap gap-2">
-          {MOCK_FIELD_REPS.map((rep) => (
-            <button
-              key={rep.id}
-              onClick={() => setSelectedRep(rep)}
-              className={cn(
-                "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors",
-                selectedRep.id === rep.id
-                  ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)] font-medium"
-                  : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-              )}
-            >
-              <span className="w-6 h-6 rounded-full bg-[var(--primary)] text-white text-xs flex items-center justify-center font-bold shrink-0">
-                {rep.name.charAt(0)}
-              </span>
-              {rep.name}
-            </button>
-          ))}
-        </div>
+        {repsLoading ? (
+          <div className="flex gap-2">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="h-8 w-32 bg-[var(--muted)] rounded-lg animate-pulse" />
+            ))}
+          </div>
+        ) : fieldReps.length === 0 ? (
+          <p className="text-sm text-[var(--muted-foreground)]">
+            Henüz saha temsilcisi yok. Kullanıcı sayfasından ekleyin.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {fieldReps.map((rep) => (
+              <button
+                key={rep.id}
+                onClick={() => setSelectedRep(rep)}
+                className={cn(
+                  "flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm transition-colors",
+                  selectedRep?.id === rep.id
+                    ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)] font-medium"
+                    : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                )}
+              >
+                <span className="w-6 h-6 rounded-full bg-[var(--primary)] text-white text-xs flex items-center justify-center font-bold shrink-0">
+                  {rep.name.charAt(0)}
+                </span>
+                {rep.name}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Sekme */}
@@ -406,6 +427,7 @@ export default function PortfolioPage() {
         {/* ─── Sağ: özet panel ─── */}
         <div className="w-full lg:w-64 shrink-0 space-y-3">
           {/* Seçili temsilci */}
+          {selectedRep && (
           <div className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-full bg-[var(--primary)] flex items-center justify-center text-white font-bold">
@@ -421,6 +443,7 @@ export default function PortfolioPage() {
               <span>{portfolio.length} market portföyde</span>
             </div>
           </div>
+          )}
 
           {/* Bekleyen ekleme */}
           {pendingAdd.size > 0 && (
