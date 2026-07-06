@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Navigation,
   CheckCircle,
@@ -14,9 +14,12 @@ import {
   Loader2,
   AlertCircle,
   CalendarCheck,
+  Map as MapIcon,
+  List,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiClient } from "@/lib/api/client";
+import { APIProvider, Map, useMap, useMapsLibrary } from "@vis.gl/react-google-maps";
 
 // ─── Tipler ───────────────────────────────────────────────────────────────────
 
@@ -104,6 +107,114 @@ function formatVisitedAt(isoStr?: string): string {
   return new Date(isoStr).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" });
 }
 
+// ─── Harita bileşeni ─────────────────────────────────────────────────────────
+
+const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
+const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+
+function RouteMapInner({ stops }: { stops: RouteStopApi[] }) {
+  const map = useMap();
+  const mapsLib = useMapsLibrary("maps");
+  const polylineRef = useRef<google.maps.Polyline | null>(null);
+  const markersRef = useRef<google.maps.Marker[]>([]);
+
+  useEffect(() => {
+    if (!map || !mapsLib) return;
+
+    const sorted = [...stops]
+      .filter((s) => s.market?.latitude && s.market?.longitude)
+      .sort((a, b) => a.order_index - b.order_index);
+
+    const path = sorted.map((s) => ({
+      lat: s.market!.latitude,
+      lng: s.market!.longitude,
+    }));
+
+    // Rota çizgisi
+    if (path.length >= 2) {
+      polylineRef.current = new mapsLib.Polyline({
+        path,
+        map,
+        strokeColor: "#6366f1",
+        strokeOpacity: 0.85,
+        strokeWeight: 4,
+        geodesic: true,
+      });
+    }
+
+    // Numaralı pinler
+    markersRef.current = sorted.map((stop, i) => {
+      const statusColor =
+        stop.status === "visited"
+          ? "#10b981"
+          : stop.status === "skipped"
+          ? "#f59e0b"
+          : stop.status === "rolled_over"
+          ? "#f97316"
+          : "#6366f1";
+
+      return new google.maps.Marker({
+        position: { lat: stop.market!.latitude, lng: stop.market!.longitude },
+        map,
+        label: { text: String(i + 1), color: "#fff", fontWeight: "bold", fontSize: "11px" },
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 13,
+          fillColor: statusColor,
+          fillOpacity: 1,
+          strokeColor: "#fff",
+          strokeWeight: 2,
+        },
+        title: stop.market?.name,
+        zIndex: 10,
+      });
+    });
+
+    // Haritayı rota'ya fit et
+    if (path.length > 0) {
+      const bounds = new google.maps.LatLngBounds();
+      path.forEach((p) => bounds.extend(p));
+      map.fitBounds(bounds, { top: 40, right: 40, bottom: 40, left: 40 });
+    }
+
+    return () => {
+      polylineRef.current?.setMap(null);
+      markersRef.current.forEach((m) => m.setMap(null));
+      markersRef.current = [];
+    };
+  }, [map, mapsLib, stops]);
+
+  return null;
+}
+
+function RouteMap({ stops }: { stops: RouteStopApi[] }) {
+  if (!API_KEY) {
+    return (
+      <div className="w-full h-full flex flex-col items-center justify-center bg-[var(--muted)] gap-2 rounded-xl">
+        <MapPin className="w-8 h-8 text-[var(--muted-foreground)]" />
+        <p className="text-xs text-[var(--muted-foreground)] text-center px-4">
+          Google Maps API anahtarı gerekli
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <APIProvider apiKey={API_KEY}>
+      <Map
+        defaultCenter={ANTALYA_CENTER}
+        defaultZoom={12}
+        mapId="antalyamarket-route-map"
+        gestureHandling="greedy"
+        disableDefaultUI={false}
+        style={{ width: "100%", height: "100%" }}
+      >
+        <RouteMapInner stops={stops} />
+      </Map>
+    </APIProvider>
+  );
+}
+
 // ─── Ana sayfa ────────────────────────────────────────────────────────────────
 
 export default function RoutePage() {
@@ -113,6 +224,7 @@ export default function RoutePage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [actioningId, setActioningId] = useState<string | null>(null);
+  const [view, setView] = useState<"map" | "list">("map");
 
   // Rotayı yükle
   const loadRoute = useCallback(async () => {
@@ -268,19 +380,52 @@ export default function RoutePage() {
               {new Date().toLocaleDateString("tr-TR", { weekday: "long", day: "numeric", month: "long" })}
             </p>
           </div>
-          <button
-            onClick={handleReorder}
-            disabled={isReordering}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--background)] text-xs text-[var(--muted-foreground)] active:scale-95 transition-transform disabled:opacity-50"
-            aria-label="GPS konumuna göre rotayı yeniden sırala"
-          >
-            {isReordering ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="w-3.5 h-3.5" />
-            )}
-            Yeniden Sırala
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Harita / Liste geçiş */}
+            <div className="flex rounded-xl border border-[var(--border)] overflow-hidden bg-[var(--background)]">
+              <button
+                onClick={() => setView("map")}
+                className={cn(
+                  "flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition-colors",
+                  view === "map"
+                    ? "bg-[var(--primary)] text-white"
+                    : "text-[var(--muted-foreground)]"
+                )}
+                aria-label="Harita görünümü"
+                aria-pressed={view === "map"}
+              >
+                <MapIcon className="w-3.5 h-3.5" />
+                Harita
+              </button>
+              <button
+                onClick={() => setView("list")}
+                className={cn(
+                  "flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition-colors",
+                  view === "list"
+                    ? "bg-[var(--primary)] text-white"
+                    : "text-[var(--muted-foreground)]"
+                )}
+                aria-label="Liste görünümü"
+                aria-pressed={view === "list"}
+              >
+                <List className="w-3.5 h-3.5" />
+                Liste
+              </button>
+            </div>
+            <button
+              onClick={handleReorder}
+              disabled={isReordering}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-[var(--border)] bg-[var(--background)] text-xs text-[var(--muted-foreground)] active:scale-95 transition-transform disabled:opacity-50"
+              aria-label="GPS konumuna göre rotayı yeniden sırala"
+            >
+              {isReordering ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="w-3.5 h-3.5" />
+              )}
+              Sırala
+            </button>
+          </div>
         </div>
 
         {/* İlerleme */}
@@ -315,6 +460,13 @@ export default function RoutePage() {
           </div>
         </div>
       </div>
+
+      {/* Harita görünümü */}
+      {view === "map" && (
+        <div className="mx-4 mt-4 rounded-2xl overflow-hidden border border-[var(--border)] shadow-sm" style={{ height: 320 }}>
+          <RouteMap stops={sorted} />
+        </div>
+      )}
 
       {/* Sıradaki durak banner */}
       {nextStop && (
@@ -357,7 +509,7 @@ export default function RoutePage() {
         </div>
       )}
 
-      {/* Durak listesi */}
+      {/* Durak listesi — harita modunda da göster, liste modunda da */}
       <div className="px-4 mt-4 space-y-2">
         <p className="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wide mb-3">
           Tüm Duraklar ({stops.length})
