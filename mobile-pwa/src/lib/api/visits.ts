@@ -1,5 +1,12 @@
 import { apiClient } from "./client";
 
+export interface MarketBrief {
+  id: string;
+  name: string;
+  address: string;
+  type: string;
+}
+
 export interface VisitOut {
   id: string;
   market_id: string;
@@ -10,6 +17,7 @@ export interface VisitOut {
   gps_lat?: number | null;
   gps_lng?: number | null;
   is_successful: boolean;
+  market?: MarketBrief | null;
 }
 
 export async function startVisit(payload: {

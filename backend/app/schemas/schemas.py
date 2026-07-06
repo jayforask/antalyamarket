@@ -118,6 +118,7 @@ class VisitOut(BaseModel):
     gps_lat: Optional[float] = None
     gps_lng: Optional[float] = None
     is_successful: bool
+    market: Optional["MarketOut"] = None
 
     model_config = {"from_attributes": True}
 
@@ -158,14 +159,53 @@ class ShiftEnd(BaseModel):
     end_lng: float
 
 
+class ShiftLocationUpdate(BaseModel):
+    current_lat: float
+    current_lng: float
+
+
 class ShiftOut(BaseModel):
     id: UUID
     user_id: UUID
     start_time: datetime
     end_time: Optional[datetime] = None
+    start_lat: Optional[float] = None
+    start_lng: Optional[float] = None
+    end_lat: Optional[float] = None
+    end_lng: Optional[float] = None
+    current_lat: Optional[float] = None
+    current_lng: Optional[float] = None
+    location_updated_at: Optional[datetime] = None
     status: str
 
     model_config = {"from_attributes": True}
+
+
+# ─── User Day Detail ─────────────────────────────────────────────────────────
+
+class UserDayStats(BaseModel):
+    total_duration_minutes: int
+    visit_count: int
+    successful_count: int
+    success_rate: float
+    estimated_km: float
+
+
+class UserDayDetailOut(BaseModel):
+    user: "UserOut"
+    date: date
+    shift: Optional[ShiftOut] = None
+    visits: List["VisitOut"] = []
+    stats: UserDayStats
+
+    model_config = {"from_attributes": True}
+
+
+class ShiftDateItem(BaseModel):
+    date: date
+    shift_id: UUID
+    status: str
+    visit_count: int
 
 
 # ─── Reports ─────────────────────────────────────────────────────────────────

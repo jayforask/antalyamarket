@@ -3,13 +3,18 @@
 import { useState, useEffect } from "react";
 import { APIProvider, Map } from "@vis.gl/react-google-maps";
 import { RepMarker } from "@/components/features/maps/RepMarker";
+import type { RepLocationFull } from "@/components/features/maps/RepMarker";
 import { VisitMarker } from "@/components/features/maps/VisitMarker";
+import type { VisitForMarker } from "@/components/features/maps/VisitMarker";
 import { RoutePolyline } from "@/components/features/maps/RoutePolyline";
 import { apiClient } from "@/lib/api/client";
 import type { DailyRouteApi } from "@/lib/api/routesApi";
-import type { Visit, User } from "@/types";
+import type { User } from "@/types";
 import { MapPin, Route, Users, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// VisitForMarker'ı yeniden kullan — aynı şema
+type VisitItem = VisitForMarker;
 
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
 const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
@@ -38,15 +43,28 @@ function toRouteForMap(r: DailyRouteApi) {
   };
 }
 
-// RepMarker için uyumlu rep şekli
-function toRepLocation(user: User) {
+// RepMarker için uyumlu rep şekli — aktif vardiya koordinatından al
+function toRepLocation(user: User, shift: { start_lat: number | null; start_lng: number | null; start_time: string } | null) {
   return {
     user_id: user.id,
     name: user.name,
-    lat: ANTALYA_CENTER.lat + (Math.random() - 0.5) * 0.05,
-    lng: ANTALYA_CENTER.lng + (Math.random() - 0.5) * 0.05,
-    timestamp: new Date().toISOString(),
+    lat: shift?.start_lat ?? ANTALYA_CENTER.lat,
+    lng: shift?.start_lng ?? ANTALYA_CENTER.lng,
+    timestamp: shift?.start_time ?? new Date().toISOString(),
   };
+}
+
+// Aktif vardiya tipi (all-active endpoint'inden gelen) — current_lat/lng öncelikli
+interface ActiveShift {
+  id: string;
+  user_id: string;
+  start_time: string;
+  start_lat: number | null;
+  start_lng: number | null;
+  current_lat?: number | null;
+  current_lng?: number | null;
+  location_updated_at?: string | null;
+  status: string;
 }
 
 export default function MapsPage() {
@@ -56,8 +74,10 @@ export default function MapsPage() {
   const [selectedRep, setSelectedRep] = useState<string | null>(null);
 
   const [fieldReps, setFieldReps] = useState<User[]>([]);
-  const [visits, setVisits] = useState<Visit[]>([]);
+  const [visits, setVisits] = useState<VisitItem[]>([]);
   const [routes, setRoutes] = useState<DailyRouteApi[]>([]);
+  // user_id → aktif vardiya koordinatı
+  const [activeShifts, setActiveShifts] = useState<Record<string, ActiveShift>>({});
 
   useEffect(() => {
     async function load() {
@@ -67,12 +87,28 @@ export default function MapsPage() {
         const reps = (usersData.users ?? []).filter((u: User) => u.role === "field_rep");
         setFieldReps(reps);
 
+        // Tüm aktif vardiyaları çek (gerçek koordinatlar için)
+        try {
+          const { data: shiftsData } = await apiClient.get<ActiveShift[]>("/shifts/all-active");
+          console.debug("[maps] all-active response:", shiftsData);
+          const shiftMap: Record<string, ActiveShift> = {};
+          for (const s of shiftsData) {
+            console.debug("[maps] shift entry:", s.user_id, "lat:", s.start_lat, "lng:", s.start_lng);
+            shiftMap[s.user_id] = s;
+          }
+          setActiveShifts(shiftMap);
+        } catch (err) {
+          console.error("[maps] all-active fetch failed:", err);
+          setActiveShifts({});
+        }
+
         // Bugünkü ziyaretleri çek
         try {
-          const { data: visitsData } = await apiClient.get("/operations/visits", {
-            params: { page_size: 200 },
-          });
-          setVisits(visitsData.items ?? []);
+          const { data: visitsData } = await apiClient.get<VisitItem[]>(
+            "/operations/visits",
+            { params: { page_size: 200 } }
+          );
+          setVisits(Array.isArray(visitsData) ? visitsData : []);
         } catch {
           setVisits([]);
         }
@@ -97,6 +133,50 @@ export default function MapsPage() {
     load();
   }, []);
 
+  // Her temsilci için en iyi mevcut koordinat (öncelik sırası):
+  // 1. Anlık konum (current_lat/lng) — mobil 30sn'de bir günceller
+  // 2. Vardiya başlangıç konumu (start_lat/lng)
+  // 3. Bugünkü en son ziyaretin GPS koordinatı
+  function getBestLocation(repId: string): { lat: number; lng: number; timestamp: string; isLive: boolean } | null {
+    const shift = activeShifts[repId];
+
+    // 1. Anlık konum — en güncel
+    if (shift?.current_lat && shift?.current_lng) {
+      return {
+        lat: shift.current_lat,
+        lng: shift.current_lng,
+        timestamp: shift.location_updated_at ?? shift.start_time,
+        isLive: true,
+      };
+    }
+
+    // 2. Vardiya başlangıç konumu
+    if (shift?.start_lat && shift?.start_lng) {
+      return {
+        lat: shift.start_lat,
+        lng: shift.start_lng,
+        timestamp: shift.start_time,
+        isLive: false,
+      };
+    }
+
+    // 3. Bugünkü en son ziyaretin GPS koordinatı
+    const repVisits = visits
+      .filter((v) => v.user_id === repId && v.gps_lat && v.gps_lng)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    if (repVisits.length > 0) {
+      const last = repVisits[0];
+      return {
+        lat: last.gps_lat!,
+        lng: last.gps_lng!,
+        timestamp: last.timestamp,
+        isLive: false,
+      };
+    }
+
+    return null;
+  }
+
   const filteredVisits = selectedRep
     ? visits.filter((v) => v.user_id === selectedRep)
     : visits;
@@ -108,6 +188,14 @@ export default function MapsPage() {
   const filteredReps = selectedRep
     ? fieldReps.filter((r) => r.id === selectedRep)
     : fieldReps;
+
+  // Konumu olan temsilciler (null olanları haritada gösterme)
+  const repsWithLocation = filteredReps
+    .map((rep) => ({ rep, loc: getBestLocation(rep.id) }))
+    .filter(
+      (x): x is { rep: User; loc: NonNullable<ReturnType<typeof getBestLocation>> } =>
+        x.loc !== null
+    );
 
   return (
     <div className="flex flex-col h-[calc(100vh-theme(spacing.16)-theme(spacing.12))] gap-4">
@@ -203,7 +291,7 @@ export default function MapsPage() {
                 value={filteredVisits.filter((v) => v.is_successful).length}
                 color="text-emerald-600"
               />
-              <StatChip label="Aktif" value={filteredReps.length} />
+              <StatChip label="Aktif" value={repsWithLocation.length} />
               <StatChip label="Rota" value={filteredRoutes.length} />
             </div>
           </div>
@@ -225,7 +313,9 @@ export default function MapsPage() {
               </div>
             </div>
           ) : (
-            <APIProvider apiKey={API_KEY}>
+            // key="static" — APIProvider'ın state değişimlerinde yeniden mount edilmesini önler
+            // Bu olmadan filtreleme/toggle yaptıkça harita merkezi Antalya'ya sıfırlanıyordu
+            <APIProvider key="maps-provider" apiKey={API_KEY}>
               <Map
                 defaultCenter={ANTALYA_CENTER}
                 defaultZoom={12}
@@ -234,11 +324,25 @@ export default function MapsPage() {
                 disableDefaultUI={false}
                 style={{ width: "100%", height: "100%" }}
               >
-                {/* Temsilci konumları */}
+                {/* Temsilci konumları — anlık veya vardiya başlangıç konumu */}
                 {showReps &&
-                  filteredReps.map((rep) => (
-                    <RepMarker key={rep.id} rep={toRepLocation(rep)} />
-                  ))}
+                  repsWithLocation.map(({ rep, loc }) => {
+                    const repLoc: RepLocationFull = {
+                      user_id: rep.id,
+                      name: rep.name,
+                      lat: loc.lat,
+                      lng: loc.lng,
+                      timestamp: loc.timestamp,
+                      isLive: loc.isLive,
+                    };
+                    return (
+                      <RepMarker
+                        key={rep.id}
+                        rep={repLoc}
+                        shift={activeShifts[rep.id] ?? null}
+                      />
+                    );
+                  })}
 
                 {/* Ziyaret noktaları */}
                 {showVisits &&

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Search, Plus, Shield, User, Trash2, X } from "lucide-react";
+import { Search, Plus, Shield, Trash2, X, ChevronRight } from "lucide-react";
+import Link from "next/link";
 import { cn, formatDate } from "@/lib/utils";
 import { apiClient } from "@/lib/api/client";
 import type { UserRole } from "@/types";
@@ -153,7 +154,7 @@ export default function UsersPage() {
           {filtered.map((user) => (
             <div
               key={user.id}
-              className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow"
+              className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-4 shadow-sm hover:shadow-md transition-shadow flex flex-col gap-3"
             >
               <div className="flex items-start gap-3">
                 <div className="relative shrink-0">
@@ -192,6 +193,15 @@ export default function UsersPage() {
                   <Trash2 className="w-4 h-4" aria-hidden="true" />
                 </button>
               </div>
+
+              {/* Detay linki — sadece field_rep için anlamlı ama herkese göster */}
+              <Link
+                href={`/users/${user.id}`}
+                className="flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--muted)] hover:bg-[var(--border)] transition-colors text-sm text-[var(--foreground)] group"
+              >
+                <span className="font-medium">Gün Detayını Görüntüle</span>
+                <ChevronRight className="w-4 h-4 text-[var(--muted-foreground)] group-hover:translate-x-0.5 transition-transform" aria-hidden="true" />
+              </Link>
             </div>
           ))}
           {filtered.length === 0 && (

@@ -5,6 +5,11 @@ export interface ShiftOut {
   user_id: string;
   start_time: string;
   end_time?: string | null;
+  start_lat?: number | null;
+  start_lng?: number | null;
+  current_lat?: number | null;
+  current_lng?: number | null;
+  location_updated_at?: string | null;
   status: "active" | "completed";
 }
 
@@ -31,4 +36,11 @@ export async function getActiveShift(): Promise<ShiftOut | null> {
   } catch {
     return null;
   }
+}
+
+export async function updateShiftLocation(payload: {
+  current_lat: number;
+  current_lng: number;
+}): Promise<void> {
+  await apiClient.patch("/shifts/location", payload);
 }

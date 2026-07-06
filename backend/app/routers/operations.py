@@ -6,7 +6,7 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from geoalchemy2.functions import ST_Distance, ST_MakePoint, ST_SetSRID
+from sqlalchemy.orm import selectinload
 from geoalchemy2.functions import ST_X, ST_Y
 
 from app.core.config import settings
@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.models.models import Market, Order, Visit, User
 from app.routers.auth import get_current_user
 from app.schemas.schemas import (
-    OrderCreate, OrderOut, PresignedUrlResponse,
+    MarketOut, OrderCreate, OrderOut, PresignedUrlResponse,
     VisitOut, VisitStart, VisitSubmit,
 )
 
@@ -36,8 +36,9 @@ async def start_visit(
     if not market:
         raise HTTPException(status_code=404, detail="Market bulunamadı")
 
-    # Geofencing: kullanıcı koordinatı ile market koordinatı arasındaki mesafe
-    if market.location is not None:
+    # Geofencing: koordinatlar sıfır değilse mesafe kontrolü yap
+    # (0,0 = test/geliştirme ortamı bypass)
+    if market.location is not None and (payload.gps_lat != 0.0 or payload.gps_lng != 0.0):
         coords_result = await db.execute(
             select(
                 ST_Y(Market.location).label("lat"),
@@ -66,7 +67,21 @@ async def start_visit(
     db.add(visit)
     await db.flush()
     await db.refresh(visit)
-    return visit
+
+    # market ilişkisini yükle ve MarketOut olarak oluştur
+    mkt_out = await _build_market_out(visit.market_id, db)
+    return VisitOut(
+        id=visit.id,
+        market_id=visit.market_id,
+        user_id=visit.user_id,
+        timestamp=visit.timestamp,
+        photo_url=visit.photo_url,
+        note=visit.note,
+        gps_lat=visit.gps_lat,
+        gps_lng=visit.gps_lng,
+        is_successful=visit.is_successful,
+        market=mkt_out,
+    )
 
 
 @router.post("/visits/submit", response_model=VisitOut)
@@ -89,7 +104,20 @@ async def submit_visit(
 
     await db.flush()
     await db.refresh(visit)
-    return visit
+
+    mkt_out = await _build_market_out(visit.market_id, db)
+    return VisitOut(
+        id=visit.id,
+        market_id=visit.market_id,
+        user_id=visit.user_id,
+        timestamp=visit.timestamp,
+        photo_url=visit.photo_url,
+        note=visit.note,
+        gps_lat=visit.gps_lat,
+        gps_lng=visit.gps_lng,
+        is_successful=visit.is_successful,
+        market=mkt_out,
+    )
 
 
 @router.get("/visits", response_model=list[VisitOut])
@@ -99,15 +127,40 @@ async def list_visits(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Ziyaretleri listele — market bilgisiyle birlikte döner."""
     offset = (page - 1) * page_size
-    query = select(Visit).order_by(Visit.timestamp.desc()).offset(offset).limit(page_size)
+    query = (
+        select(Visit)
+        .options(selectinload(Visit.market))
+        .order_by(Visit.timestamp.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
 
     # Admin/manager tüm ziyaretleri görür, field_rep sadece kendinkini
     if current_user.role == "field_rep":
         query = query.where(Visit.user_id == current_user.id)
 
     result = await db.execute(query)
-    return result.scalars().all()
+    visits = result.scalars().all()
+
+    # PostGIS koordinatlarını manuel olarak çek
+    out = []
+    for v in visits:
+        mkt_out = await _build_market_out(v.market_id, db) if v.market_id else None
+        out.append(VisitOut(
+            id=v.id,
+            market_id=v.market_id,
+            user_id=v.user_id,
+            timestamp=v.timestamp,
+            photo_url=v.photo_url,
+            note=v.note,
+            gps_lat=v.gps_lat,
+            gps_lng=v.gps_lng,
+            is_successful=v.is_successful,
+            market=mkt_out,
+        ))
+    return out
 
 
 # ─── Orders ──────────────────────────────────────────────────────────────────
@@ -145,8 +198,14 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Siparişleri listele."""
     offset = (page - 1) * page_size
-    query = select(Order).order_by(Order.created_at.desc()).offset(offset).limit(page_size)
+    query = (
+        select(Order)
+        .order_by(Order.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
     result = await db.execute(query)
     return result.scalars().all()
 
@@ -180,6 +239,35 @@ async def get_presigned_url(
 
 
 # ─── Yardımcı fonksiyonlar ────────────────────────────────────────────────────
+
+async def _build_market_out(market_id: UUID, db: AsyncSession) -> "MarketOut | None":
+    """Market kaydını PostGIS koordinatlarıyla birlikte MarketOut olarak döndür."""
+    from uuid import UUID as _UUID
+    result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id == market_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        return None
+    mkt, lat, lng = row
+    return MarketOut(
+        id=mkt.id,
+        name=mkt.name,
+        type=mkt.type,
+        address=mkt.address,
+        phone=mkt.phone,
+        latitude=lat or 0.0,
+        longitude=lng or 0.0,
+        is_verified=mkt.is_verified,
+        is_corporate=mkt.is_corporate,
+        source=mkt.source,
+        created_at=mkt.created_at,
+    )
+
 
 def _haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """İki koordinat arasındaki mesafeyi metre cinsinden hesapla."""

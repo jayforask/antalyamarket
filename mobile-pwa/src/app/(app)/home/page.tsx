@@ -1,11 +1,11 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { MapPin, Clock, Play, StopCircle, ChevronRight, CheckCircle, Loader2 } from "lucide-react";
 import { cn, formatTime } from "@/lib/utils";
 import { useAuthStore } from "@/store/authStore";
-import { startShift, endShift, getActiveShift, type ShiftOut } from "@/lib/api/shifts";
+import { startShift, endShift, getActiveShift, updateShiftLocation, type ShiftOut } from "@/lib/api/shifts";
 import { apiClient } from "@/lib/api/client";
 import type { VisitOut } from "@/lib/api/visits";
 
@@ -21,15 +21,70 @@ export default function HomePage() {
   const [visits, setVisits] = useState<VisitOut[]>([]);
   const [visitsLoading, setVisitsLoading] = useState(true);
 
-  // Aktif vardiyayı ve bugünkü ziyaretleri yükle
+  // Geçen süreyi her saniye yeniden hesaplamak için tick state'i
+  const [tick, setTick] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const locationPingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Aktif vardiyayı yükle
   useEffect(() => {
-    getActiveShift().then(setShift);
+    getActiveShift().then(setShift).catch(() => setShift(null));
   }, []);
+
+  // Shift aktifken timer'ı ve konum ping'ini başlat, bitince durdur
+  useEffect(() => {
+    if (shift?.status === "active") {
+      // Saniye sayacı
+      timerRef.current = setInterval(() => setTick((t) => t + 1), 1000);
+
+      // 30 saniyede bir anlık konumu backend'e gönder
+      const sendLocation = () => {
+        if (!navigator.geolocation) return;
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            updateShiftLocation({
+              current_lat: pos.coords.latitude,
+              current_lng: pos.coords.longitude,
+            }).catch(() => {
+              // Sessiz hata — kullanıcıyı rahatsız etme
+            });
+          },
+          () => {
+            // Konum izni yoksa / zaman aşımı — sessiz geç
+          },
+          { enableHighAccuracy: true, timeout: 8000, maximumAge: 20000 }
+        );
+      };
+
+      // Sayfa açılır açılmaz bir kez gönder, sonra 30sn'de bir
+      sendLocation();
+      locationPingRef.current = setInterval(sendLocation, 30_000);
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      if (locationPingRef.current) {
+        clearInterval(locationPingRef.current);
+        locationPingRef.current = null;
+      }
+    }
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+      if (locationPingRef.current) {
+        clearInterval(locationPingRef.current);
+        locationPingRef.current = null;
+      }
+    };
+  }, [shift?.status]);
 
   const loadVisits = useCallback(async () => {
     setVisitsLoading(true);
     try {
-      const { data } = await apiClient.get<VisitOut[]>("/visits", {
+      const { data } = await apiClient.get<VisitOut[]>("/operations/visits", {
         params: { page: 1, page_size: 10 },
       });
       // Bugünün ziyaretlerini filtrele
@@ -46,12 +101,21 @@ export default function HomePage() {
     loadVisits();
   }, [loadVisits]);
 
+  // tick değişince yeniden hesaplanır — gerçek zamanlı sayaç
   const getElapsed = () => {
-    if (!shift) return "00:00";
-    const diff = Math.floor((Date.now() - new Date(shift.start_time).getTime()) / 1000);
+    if (!shift?.start_time) return "00:00:00";
+    const raw = shift.start_time.endsWith("Z") || shift.start_time.includes("+")
+      ? shift.start_time
+      : shift.start_time + "Z";
+    const startMs = new Date(raw).getTime();
+    if (isNaN(startMs)) return "00:00:00";
+    // tick bağımlılığı — her saniye yeniden render
+    void tick;
+    const diff = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
     const h = Math.floor(diff / 3600).toString().padStart(2, "0");
     const m = Math.floor((diff % 3600) / 60).toString().padStart(2, "0");
-    return `${h}:${m}`;
+    const s = (diff % 60).toString().padStart(2, "0");
+    return `${h}:${m}:${s}`;
   };
 
   const handleShiftToggle = async () => {
@@ -230,7 +294,7 @@ export default function HomePage() {
                 </span>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-[var(--foreground)] truncate">
-                    {v.market_id}
+                    {v.market?.name ?? v.market_id.slice(0, 8) + "…"}
                   </p>
                   <p className="text-xs text-[var(--muted-foreground)]">
                     {new Date(v.timestamp).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit" })}

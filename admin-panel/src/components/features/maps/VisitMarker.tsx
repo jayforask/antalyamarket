@@ -3,16 +3,44 @@
 import { AdvancedMarker, InfoWindow, useAdvancedMarkerRef } from "@vis.gl/react-google-maps";
 import { useState } from "react";
 import { CheckCircle, XCircle } from "lucide-react";
-import type { Visit } from "@/types";
 import { formatDateTime } from "@/lib/utils";
 
+// Backend VisitOut şemasıyla uyumlu — gps_lat/gps_lng
+export interface VisitForMarker {
+  id: string;
+  market_id: string;
+  user_id: string;
+  timestamp: string;
+  is_successful: boolean;
+  gps_lat?: number | null;
+  gps_lng?: number | null;
+  note?: string | null;
+  market?: {
+    id: string;
+    name: string;
+    address: string;
+    latitude: number;
+    longitude: number;
+  } | null;
+  user?: {
+    id: string;
+    name: string;
+  } | null;
+}
+
 interface VisitMarkerProps {
-  visit: Visit;
+  visit: VisitForMarker;
 }
 
 export function VisitMarker({ visit }: VisitMarkerProps) {
   const [open, setOpen] = useState(false);
   const [markerRef, marker] = useAdvancedMarkerRef();
+
+  // GPS koordinatı yoksa market koordinatını kullan, o da yoksa render etme
+  const lat = visit.gps_lat ?? visit.market?.latitude;
+  const lng = visit.gps_lng ?? visit.market?.longitude;
+
+  if (!lat || !lng) return null;
 
   const isSuccess = visit.is_successful;
 
@@ -20,7 +48,7 @@ export function VisitMarker({ visit }: VisitMarkerProps) {
     <>
       <AdvancedMarker
         ref={markerRef}
-        position={{ lat: visit.gps_coords.lat, lng: visit.gps_coords.lng }}
+        position={{ lat, lng }}
         onClick={() => setOpen(true)}
         title={visit.market?.name}
       >
@@ -50,14 +78,21 @@ export function VisitMarker({ visit }: VisitMarkerProps) {
         >
           <div className="text-xs space-y-1 py-1 min-w-40">
             <p className="text-gray-600">{visit.market?.address}</p>
-            <p className="text-gray-500">
-              Temsilci: <span className="font-medium text-gray-700">{visit.user?.name}</span>
-            </p>
+            {visit.user?.name && (
+              <p className="text-gray-500">
+                Temsilci:{" "}
+                <span className="font-medium text-gray-700">{visit.user.name}</span>
+              </p>
+            )}
             <p className="text-gray-500">{formatDateTime(visit.timestamp)}</p>
             {visit.note && (
               <p className="text-gray-500 italic">&quot;{visit.note}&quot;</p>
             )}
-            <p className={isSuccess ? "text-emerald-600 font-medium" : "text-red-600 font-medium"}>
+            <p
+              className={
+                isSuccess ? "text-emerald-600 font-medium" : "text-red-600 font-medium"
+              }
+            >
               {isSuccess ? "✓ Başarılı" : "✗ Başarısız"}
             </p>
           </div>

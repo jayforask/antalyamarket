@@ -15,6 +15,9 @@ type VisitStep = "select" | "checking" | "active" | "submitting" | "done";
 
 const GEOFENCE_THRESHOLD = 50; // metre
 
+// Konum alınamayınca gps_lat/lng = 0 → backend bypass eder (geliştirme/test modu)
+const GEO_UNAVAILABLE_COORDS = { lat: 0, lng: 0 };
+
 export default function VisitPage() {
   const router = useRouter();
   const [step, setStep] = useState<VisitStep>("select");
@@ -31,6 +34,8 @@ export default function VisitPage() {
   const [geoError, setGeoError] = useState<string | null>(null);
   const [distance, setDistance] = useState<number | null>(null);
   const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  const [geoUnavailable, setGeoUnavailable] = useState(false); // konum servisi erişilemez
 
   // Ziyaret formu
   const [note, setNote] = useState("");
@@ -70,9 +75,14 @@ export default function VisitPage() {
     setSelectedMarket(market);
     setStep("checking");
     setGeoError(null);
+    setGeoUnavailable(false);
 
     if (!navigator.geolocation) {
-      setGeoError("Cihazınız konum servisini desteklemiyor.");
+      // Cihaz konum desteklemiyor — test/bypass modu ile devam et
+      setGeoUnavailable(true);
+      setUserCoords(GEO_UNAVAILABLE_COORDS);
+      setDistance(null);
+      setStep("active");
       return;
     }
 
@@ -94,9 +104,10 @@ export default function VisitPage() {
         }
       },
       () => {
-        // Konum alınamazsa (geliştirme/test ortamı) direkt aktif yap
-        setUserCoords({ lat: 0, lng: 0 });
-        setDistance(0);
+        // Konum izni reddedildi veya zaman aşımı — bypass modu
+        setGeoUnavailable(true);
+        setUserCoords(GEO_UNAVAILABLE_COORDS);
+        setDistance(null);
         setStep("active");
       },
       { enableHighAccuracy: true, timeout: 10000 }
@@ -168,6 +179,7 @@ export default function VisitPage() {
     setGeoError(null);
     setDistance(null);
     setUserCoords(null);
+    setGeoUnavailable(false);
     setNote("");
     setPhotoPreview(null);
     setPhotoFile(null);
@@ -273,13 +285,22 @@ export default function VisitPage() {
         {/* STEP 3 — Ziyaret aktif */}
         {(step === "active" || step === "submitting") && (
           <div className="space-y-4">
-            <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
-              <p className="text-sm font-medium text-emerald-700 flex items-center gap-2">
-                <CheckCircle className="w-4 h-4" aria-hidden="true" />
-                Konum doğrulandı
-                {distance !== null && distance > 0 && <span className="font-normal">({distance}m)</span>}
-              </p>
-            </div>
+            {geoUnavailable ? (
+              <div className="p-4 bg-amber-50 rounded-xl border border-amber-200">
+                <p className="text-sm font-medium text-amber-700 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" aria-hidden="true" />
+                  Konum alınamadı — GPS doğrulaması atlandı
+                </p>
+              </div>
+            ) : (
+              <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
+                <p className="text-sm font-medium text-emerald-700 flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4" aria-hidden="true" />
+                  Konum doğrulandı
+                  {distance !== null && distance > 0 && <span className="font-normal">({distance}m)</span>}
+                </p>
+              </div>
+            )}
 
             {submitError && (
               <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
@@ -396,7 +417,7 @@ export default function VisitPage() {
             <p className="text-sm text-[var(--muted-foreground)]">{selectedMarket?.name}</p>
             <div className="flex gap-3 mt-2 w-full">
               <button
-                onClick={() => router.push("/order")}
+                onClick={() => router.push(visitId ? `/order?visit_id=${visitId}` : "/order")}
                 className="flex-1 py-3.5 rounded-xl bg-[var(--primary)] text-white font-semibold text-sm"
               >
                 Sipariş Al

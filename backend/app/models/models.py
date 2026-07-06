@@ -100,6 +100,10 @@ class Shift(Base):
     start_lng = Column(Float, nullable=True)
     end_lat = Column(Float, nullable=True)
     end_lng = Column(Float, nullable=True)
+    # Anlık GPS konumu — mobil uygulama periyodik olarak günceller
+    current_lat = Column(Float, nullable=True)
+    current_lng = Column(Float, nullable=True)
+    location_updated_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(
         Enum("active", "completed", "cancelled", name="shift_status"),
         nullable=False,
