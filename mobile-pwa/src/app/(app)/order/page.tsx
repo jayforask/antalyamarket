@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, Minus, ShoppingCart, CheckCircle, Trash2, Loader2, AlertCircle } from "lucide-react";
 import { cn, formatCurrency } from "@/lib/utils";
@@ -25,7 +25,8 @@ const PRODUCTS: Product[] = [
 
 type CartItem = { product: Product; quantity: number };
 
-export default function OrderPage() {
+// useSearchParams() Suspense boundary içinde olmalı
+function OrderPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Ziyaret sayfasından ?visit_id=xxx ile gelinebilir
@@ -225,5 +226,14 @@ export default function OrderPage() {
         </div>
       )}
     </div>
+  );
+}
+
+// Suspense boundary — useSearchParams() için gerekli
+export default function OrderPage() {
+  return (
+    <Suspense fallback={null}>
+      <OrderPageInner />
+    </Suspense>
   );
 }
