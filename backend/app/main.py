@@ -1,16 +1,61 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.database import get_db
 from app.routers import auth, markets, operations, reports
 from app.routers import portfolio, routes, shifts
+
+
+# ─── Startup migrations ───────────────────────────────────────────────────────
+
+async def _run_migrations() -> None:
+    """
+    Uygulama başlarken idempotent schema migration'larını çalıştır.
+    IF NOT EXISTS kullandığı için birden fazla çalıştırılması güvenlidir.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+
+    migrations = [
+        # Shift tablosuna anlık GPS kolon ekle (v1.1)
+        """
+        ALTER TABLE shifts
+            ADD COLUMN IF NOT EXISTS current_lat FLOAT,
+            ADD COLUMN IF NOT EXISTS current_lng FLOAT,
+            ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ
+        """,
+    ]
+
+    async with AsyncSessionLocal() as session:
+        for sql in migrations:
+            await session.execute(text(sql))
+        await session.commit()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Uygulama başlarken migration'ları çalıştır."""
+    try:
+        await _run_migrations()
+    except Exception as exc:
+        # Migration hatası uygulamayı durdurmasın — loglara düşsün
+        import logging
+        logging.getLogger("startup").warning(f"Migration warning: {exc}")
+    yield  # Uygulama çalışıyor
+
+
+# ─── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="SFA API — Saha Satış Yönetimi",
     description="Saha temsilcileri için ziyaret, sipariş ve raporlama API'si",
-    version="1.0.0",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS
@@ -34,4 +79,4 @@ app.include_router(shifts.router)
 
 @app.get("/health", tags=["system"])
 async def health_check():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.1.0"}
