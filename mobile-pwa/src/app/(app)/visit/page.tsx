@@ -1,43 +1,70 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   MapPin, Camera, CheckCircle, XCircle,
-  AlertTriangle, Search, ArrowLeft,
+  AlertTriangle, Search, ArrowLeft, Loader2,
 } from "lucide-react";
 import { cn, calculateDistance } from "@/lib/utils";
+import { searchMarkets } from "@/lib/api/markets";
+import { startVisit, submitVisit, getPresignedUrl } from "@/lib/api/visits";
 import type { Market } from "@/types";
 
-type VisitStep = "select" | "checking" | "active" | "done";
-
-const MOCK_MARKETS: Market[] = [
-  { id: "1", name: "Migros Konyaaltı", type: "market", address: "Konyaaltı Cad. No:15", latitude: 36.884102, longitude: 30.695621, is_verified: true },
-  { id: "2", name: "ŞokMarket Lara", type: "market", address: "Lara Cad. No:42", latitude: 36.862341, longitude: 30.731456, is_verified: true },
-  { id: "3", name: "BİM Muratpaşa", type: "market", address: "Muratpaşa Mah. No:5", latitude: 36.879234, longitude: 30.712345, is_verified: true },
-  { id: "4", name: "A101 Kepez", type: "market", address: "Kepez Mah. No:12", latitude: 36.872123, longitude: 30.699876, is_verified: true },
-];
+type VisitStep = "select" | "checking" | "active" | "submitting" | "done";
 
 const GEOFENCE_THRESHOLD = 50; // metre
 
 export default function VisitPage() {
   const router = useRouter();
   const [step, setStep] = useState<VisitStep>("select");
+
+  // Market seç adımı
+  const [markets, setMarkets] = useState<Market[]>([]);
+  const [marketsLoading, setMarketsLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  // Seçili market & ziyaret
   const [selectedMarket, setSelectedMarket] = useState<Market | null>(null);
+  const [visitId, setVisitId] = useState<string | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
   const [distance, setDistance] = useState<number | null>(null);
+  const [userCoords, setUserCoords] = useState<{ lat: number; lng: number } | null>(null);
+
+  // Ziyaret formu
   const [note, setNote] = useState("");
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [isSuccess, setIsSuccess] = useState(true);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const filtered = MOCK_MARKETS.filter(
-    (m) =>
-      !search ||
-      m.name.toLowerCase().includes(search.toLowerCase()) ||
-      m.address.toLowerCase().includes(search.toLowerCase())
-  );
+  // Arama debounce
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const loadMarkets = useCallback(async () => {
+    setMarketsLoading(true);
+    try {
+      const result = await searchMarkets({
+        q: debouncedSearch || undefined,
+        page: 1,
+        page_size: 50,
+      });
+      setMarkets(result.items);
+    } catch {
+      setMarkets([]);
+    } finally {
+      setMarketsLoading(false);
+    }
+  }, [debouncedSearch]);
+
+  useEffect(() => {
+    loadMarkets();
+  }, [loadMarkets]);
 
   const handleSelectMarket = (market: Market) => {
     setSelectedMarket(market);
@@ -51,10 +78,11 @@ export default function VisitPage() {
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const dist = calculateDistance(
-          pos.coords.latitude, pos.coords.longitude,
-          market.latitude, market.longitude
-        );
+        const userLat = pos.coords.latitude;
+        const userLng = pos.coords.longitude;
+        setUserCoords({ lat: userLat, lng: userLng });
+
+        const dist = calculateDistance(userLat, userLng, market.latitude, market.longitude);
         setDistance(Math.round(dist));
 
         if (dist <= GEOFENCE_THRESHOLD) {
@@ -66,7 +94,8 @@ export default function VisitPage() {
         }
       },
       () => {
-        // Geliştirme ortamında konum izni yoksa direkt aktif yap
+        // Konum alınamazsa (geliştirme/test ortamı) direkt aktif yap
+        setUserCoords({ lat: 0, lng: 0 });
         setDistance(0);
         setStep("active");
       },
@@ -77,13 +106,73 @@ export default function VisitPage() {
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const url = URL.createObjectURL(file);
-    setPhotoPreview(url);
+    setPhotoFile(file);
+    setPhotoPreview(URL.createObjectURL(file));
   };
 
-  const handleSubmit = () => {
-    // Gerçekte API'ye POST /visits/submit
-    setStep("done");
+  const handleSubmit = async () => {
+    if (!selectedMarket) return;
+    setStep("submitting");
+    setSubmitError(null);
+
+    try {
+      // 1. Ziyareti başlat (geofencing backend'de de kontrol eder)
+      const coords = userCoords ?? { lat: 0, lng: 0 };
+      const visit = await startVisit({
+        market_id: String(selectedMarket.id),
+        gps_lat: coords.lat,
+        gps_lng: coords.lng,
+      });
+      setVisitId(visit.id);
+
+      // 2. Fotoğraf varsa S3'e yükle
+      let photoUrl: string | undefined;
+      if (photoFile) {
+        try {
+          const ext = photoFile.name.split(".").pop() ?? "jpg";
+          const filename = `visit_${Date.now()}.${ext}`;
+          const { upload_url, file_url } = await getPresignedUrl(filename);
+          await fetch(upload_url, {
+            method: "PUT",
+            body: photoFile,
+            headers: { "Content-Type": photoFile.type },
+          });
+          photoUrl = file_url;
+        } catch {
+          // Fotoğraf yükleme başarısız olsa da ziyareti kaydet
+        }
+      }
+
+      // 3. Ziyareti tamamla
+      await submitVisit({
+        visit_id: visit.id,
+        is_successful: isSuccess,
+        note: note.trim() || undefined,
+        photo_url: photoUrl,
+      });
+
+      setStep("done");
+    } catch (err: unknown) {
+      const msg =
+        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        "Ziyaret kaydedilemedi. Lütfen tekrar deneyin.";
+      setSubmitError(msg);
+      setStep("active");
+    }
+  };
+
+  const resetVisit = () => {
+    setStep("select");
+    setSelectedMarket(null);
+    setVisitId(null);
+    setGeoError(null);
+    setDistance(null);
+    setUserCoords(null);
+    setNote("");
+    setPhotoPreview(null);
+    setPhotoFile(null);
+    setIsSuccess(true);
+    setSubmitError(null);
   };
 
   return (
@@ -92,7 +181,7 @@ export default function VisitPage() {
       <div className="sticky top-0 z-10 bg-[var(--card)] border-b border-[var(--border)] px-4 py-3 flex items-center gap-3">
         {step !== "select" && (
           <button
-            onClick={() => { setStep("select"); setSelectedMarket(null); setGeoError(null); }}
+            onClick={resetVisit}
             className="p-1.5 rounded-lg hover:bg-[var(--muted)] text-[var(--muted-foreground)] transition-colors"
             aria-label="Geri"
           >
@@ -102,7 +191,7 @@ export default function VisitPage() {
         <h1 className="text-base font-semibold text-[var(--foreground)]">
           {step === "select" ? "Market Seç" :
            step === "checking" ? "Konum Kontrol" :
-           step === "active" ? selectedMarket?.name :
+           step === "active" || step === "submitting" ? selectedMarket?.name :
            "Ziyaret Tamamlandı"}
         </h1>
       </div>
@@ -121,23 +210,34 @@ export default function VisitPage() {
                 className="w-full pl-10 pr-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] text-sm focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               />
             </div>
-            <div className="space-y-2">
-              {filtered.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => handleSelectMarket(m)}
-                  className="w-full flex items-center gap-3 p-4 bg-[var(--card)] border border-[var(--border)] rounded-xl active:scale-[0.98] transition-transform text-left"
-                >
-                  <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
-                    <MapPin className="w-5 h-5 text-blue-600" aria-hidden="true" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-[var(--foreground)] truncate">{m.name}</p>
-                    <p className="text-xs text-[var(--muted-foreground)] truncate">{m.address}</p>
-                  </div>
-                </button>
-              ))}
-            </div>
+
+            {marketsLoading ? (
+              <div className="flex justify-center py-10">
+                <Loader2 className="w-6 h-6 animate-spin text-[var(--primary)]" />
+              </div>
+            ) : markets.length === 0 ? (
+              <p className="text-center text-sm text-[var(--muted-foreground)] py-10">
+                {search ? "Sonuç bulunamadı." : "Henüz market yok."}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {markets.map((m) => (
+                  <button
+                    key={String(m.id)}
+                    onClick={() => handleSelectMarket(m)}
+                    className="w-full flex items-center gap-3 p-4 bg-[var(--card)] border border-[var(--border)] rounded-xl active:scale-[0.98] transition-transform text-left"
+                  >
+                    <div className="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
+                      <MapPin className="w-5 h-5 text-blue-600" aria-hidden="true" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-[var(--foreground)] truncate">{m.name}</p>
+                      <p className="text-xs text-[var(--muted-foreground)] truncate">{m.address}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -160,7 +260,7 @@ export default function VisitPage() {
                 <p className="font-semibold text-[var(--foreground)]">Çok Uzaktasınız</p>
                 <p className="text-sm text-[var(--muted-foreground)] max-w-xs">{geoError}</p>
                 <button
-                  onClick={() => setStep("select")}
+                  onClick={resetVisit}
                   className="mt-2 px-5 py-2.5 rounded-xl border border-[var(--border)] text-sm font-medium text-[var(--foreground)]"
                 >
                   Geri Dön
@@ -171,7 +271,7 @@ export default function VisitPage() {
         )}
 
         {/* STEP 3 — Ziyaret aktif */}
-        {step === "active" && (
+        {(step === "active" || step === "submitting") && (
           <div className="space-y-4">
             <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200">
               <p className="text-sm font-medium text-emerald-700 flex items-center gap-2">
@@ -181,12 +281,19 @@ export default function VisitPage() {
               </p>
             </div>
 
+            {submitError && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
+                {submitError}
+              </div>
+            )}
+
             {/* Durum */}
             <div>
               <p className="text-sm font-medium text-[var(--foreground)] mb-2">Ziyaret Sonucu</p>
               <div className="flex gap-2">
                 <button
                   onClick={() => setIsSuccess(true)}
+                  disabled={step === "submitting"}
                   className={cn(
                     "flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border text-sm font-medium transition-colors",
                     isSuccess
@@ -198,6 +305,7 @@ export default function VisitPage() {
                 </button>
                 <button
                   onClick={() => setIsSuccess(false)}
+                  disabled={step === "submitting"}
                   className={cn(
                     "flex-1 flex items-center justify-center gap-2 py-3 rounded-xl border text-sm font-medium transition-colors",
                     !isSuccess
@@ -227,7 +335,7 @@ export default function VisitPage() {
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={photoPreview} alt="Ziyaret fotoğrafı" className="w-full h-48 object-cover" />
                   <button
-                    onClick={() => setPhotoPreview(null)}
+                    onClick={() => { setPhotoPreview(null); setPhotoFile(null); }}
                     className="absolute top-2 right-2 bg-black/50 text-white rounded-full p-1"
                     aria-label="Fotoğrafı kaldır"
                   >✕</button>
@@ -235,7 +343,8 @@ export default function VisitPage() {
               ) : (
                 <button
                   onClick={() => fileRef.current?.click()}
-                  className="w-full h-32 rounded-xl border-2 border-dashed border-[var(--border)] flex flex-col items-center justify-center gap-2 text-[var(--muted-foreground)]"
+                  disabled={step === "submitting"}
+                  className="w-full h-32 rounded-xl border-2 border-dashed border-[var(--border)] flex flex-col items-center justify-center gap-2 text-[var(--muted-foreground)] disabled:opacity-50"
                 >
                   <Camera className="w-8 h-8" aria-hidden="true" />
                   <span className="text-sm">Fotoğraf Çek / Seç</span>
@@ -253,16 +362,26 @@ export default function VisitPage() {
                 rows={3}
                 value={note}
                 onChange={(e) => setNote(e.target.value)}
+                disabled={step === "submitting"}
                 placeholder="Ziyaret hakkında not ekleyin..."
-                className="w-full px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--card)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] resize-none"
+                className="w-full px-4 py-3 rounded-xl border border-[var(--border)] bg-[var(--card)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] resize-none disabled:opacity-50"
               />
             </div>
 
             <button
               onClick={handleSubmit}
-              className="w-full py-4 rounded-xl bg-[var(--primary)] text-white font-semibold text-base active:scale-[0.98] transition-transform"
+              disabled={step === "submitting"}
+              className={cn(
+                "w-full py-4 rounded-xl bg-[var(--primary)] text-white font-semibold text-base",
+                "flex items-center justify-center gap-2",
+                "active:scale-[0.98] transition-transform",
+                "disabled:opacity-60 disabled:cursor-not-allowed"
+              )}
             >
-              Ziyareti Tamamla
+              {step === "submitting" && (
+                <Loader2 className="w-5 h-5 animate-spin" aria-hidden="true" />
+              )}
+              {step === "submitting" ? "Kaydediliyor..." : "Ziyareti Tamamla"}
             </button>
           </div>
         )}
@@ -283,7 +402,7 @@ export default function VisitPage() {
                 Sipariş Al
               </button>
               <button
-                onClick={() => { setStep("select"); setSelectedMarket(null); setNote(""); setPhotoPreview(null); }}
+                onClick={resetVisit}
                 className="flex-1 py-3.5 rounded-xl border border-[var(--border)] text-[var(--foreground)] font-semibold text-sm"
               >
                 Yeni Ziyaret
