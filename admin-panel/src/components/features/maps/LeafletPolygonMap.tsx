@@ -7,12 +7,14 @@ interface LeafletPolygonMapProps {
   points: { latitude: number; longitude: number }[];
   setPoints: Dispatch<SetStateAction<{ latitude: number; longitude: number }[]>>;
   previewMarkets: Market[];
+  fitBoundsTrigger?: number;
 }
 
 export default function LeafletPolygonMap({
   points,
   setPoints,
   previewMarkets,
+  fitBoundsTrigger,
 }: LeafletPolygonMapProps) {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -61,6 +63,14 @@ export default function LeafletPolygonMap({
       }
     };
   }, [L]);
+
+  // Arama sonrası poligon sınırlarına odaklan
+  useEffect(() => {
+    if (!L || !mapInstanceRef.current || points.length === 0) return;
+    const latLngs: [number, number][] = points.map((p) => [p.latitude, p.longitude]);
+    const bounds = L.latLngBounds(latLngs);
+    mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
+  }, [L, fitBoundsTrigger]);
 
   // Poligon çizimini ve köşe noktalarını güncelle
   useEffect(() => {

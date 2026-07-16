@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
-import { UserCheck, Trash2, Loader2, MapPin, CheckCircle, AlertTriangle } from "lucide-react";
+import { UserCheck, Trash2, Loader2, MapPin, CheckCircle, AlertTriangle, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { apiClient } from "@/lib/api/client";
 import type { User, Market } from "@/types";
@@ -35,6 +35,11 @@ export default function PolygonAssignPage() {
 
   const [isSaving, setIsSaving] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  // Arama durumları
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+  const [fitBoundsTrigger, setFitBoundsTrigger] = useState(0);
 
   // Temsilcileri yükle
   useEffect(() => {
@@ -109,10 +114,58 @@ export default function PolygonAssignPage() {
     }
   };
 
+  // Bölge arama ve haritada poligon çizme
+  const handleSearchRegion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim()) return;
+    setIsSearching(true);
+    try {
+      const query = `${searchQuery}, Antalya, Turkey`;
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`
+      );
+      const data = await response.json();
+      
+      if (data && data.length > 0) {
+        const place = data[0];
+        const bbox = place.boundingbox; // [latMin, latMax, lngMin, lngMax]
+        
+        if (bbox && bbox.length === 4) {
+          const latMin = parseFloat(bbox[0]);
+          const latMax = parseFloat(bbox[1]);
+          const lngMin = parseFloat(bbox[2]);
+          const lngMax = parseFloat(bbox[3]);
+          
+          // 4 köşeyi saat yönünde oluştur
+          const newPoints = [
+            { latitude: latMax, longitude: lngMin }, // Sol üst
+            { latitude: latMax, longitude: lngMax }, // Sağ üst
+            { latitude: latMin, longitude: lngMax }, // Sağ alt
+            { latitude: latMin, longitude: lngMin }, // Sol alt
+          ];
+          
+          setPoints(newPoints);
+          setFitBoundsTrigger((prev) => prev + 1);
+          showToast("success", `"${searchQuery}" bölgesi başarıyla bulundu ve işaretlendi.`);
+        } else {
+          showToast("error", "Bölge sınırları tespit edilemedi.");
+        }
+      } else {
+        showToast("error", "Bölge bulunamadı. Lütfen Antalya sınırlarında bir arama yapın.");
+      }
+    } catch (error) {
+      console.error(error);
+      showToast("error", "Bölge aranırken bir bağlantı hatası oluştu.");
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
   // Çizimi sıfırla
   const handleReset = () => {
     setPoints([]);
     setPreviewMarkets([]);
+    setSearchQuery("");
   };
 
   return (
@@ -147,12 +200,41 @@ export default function PolygonAssignPage() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Sol Sütun: Harita (2 Kolon Genişliğinde) */}
         <div className="lg:col-span-2 space-y-4">
-          <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 shadow-sm">
+          <div className="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-4 shadow-sm space-y-4">
+            {/* Bölge Arama Barı */}
+            <form onSubmit={handleSearchRegion} className="flex gap-2">
+              <div className="relative flex-1">
+                <input
+                  type="text"
+                  placeholder="Bölge/Mahalle Ara (Örn: Kepez, Muratpaşa, Liman Mh.)"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="w-full bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] text-xs rounded-xl pl-9 pr-3 py-2.5 outline-none focus:border-[var(--primary)] font-medium"
+                />
+                <Search className="w-4 h-4 text-[var(--muted-foreground)] absolute left-3 top-1/2 -translate-y-1/2" />
+              </div>
+              <button
+                type="submit"
+                disabled={isSearching}
+                className="flex items-center gap-1.5 bg-[var(--primary)] text-white text-xs font-semibold px-4 py-2.5 rounded-xl hover:opacity-90 active:scale-95 transition-all disabled:opacity-50"
+              >
+                {isSearching ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Aranıyor...
+                  </>
+                ) : (
+                  "Bölgeyi Bul"
+                )}
+              </button>
+            </form>
+
             <div className="h-[480px]">
               <LeafletPolygonMap
                 points={points}
                 setPoints={setPoints}
                 previewMarkets={previewMarkets}
+                fitBoundsTrigger={fitBoundsTrigger}
               />
             </div>
             <div className="flex justify-between items-center mt-3">
