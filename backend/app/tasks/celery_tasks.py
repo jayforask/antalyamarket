@@ -158,11 +158,39 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
     """
     Her gece çalışır:
     1. O günün tamamlanmamış (pending/skipped) duraklarını tespit et
-    2. Bir sonraki iş gününün rotasına başına ekle
-    3. Eğer ertesi gün rotası yoksa oluştur (rolled_over durakları içerecek şekilde)
-    4. Limit aşılırsa fazla duraklar ertesi ertesi güne aktarılır
+    2. Bir sonraki iş gününün rotasına ekle
+    3. Rota başına maksimum limit (DAILY_CAP = 25) uygula, aşanları sonraki günlere kaydır
+    4. Rotaları coğrafi olarak yeniden sırala (re-optimize)
+    5. Sarkma sayacını (rollover_count) artır
     """
-    from app.models.models import DailyRoute, RouteStop
+    from app.models.models import DailyRoute, RouteStop, Market
+    from geoalchemy2.functions import ST_X, ST_Y
+    from app.routers.routes import _nearest_neighbor_sort, _osrm_sort_route
+
+    def get_next_workday(current_date):
+        next_day = current_date + timedelta(days=1)
+        while next_day.weekday() >= 5:  # 5 = Cumartesi, 6 = Pazar
+            next_day += timedelta(days=1)
+        return next_day
+
+    def get_or_create_route(db_session, u_id, r_date):
+        route_res = db_session.execute(
+            select(DailyRoute).where(
+                DailyRoute.user_id == u_id,
+                DailyRoute.date == r_date,
+            )
+        )
+        r = route_res.scalar_one_or_none()
+        if not r:
+            r = DailyRoute(
+                user_id=u_id,
+                date=r_date,
+                status="planned",
+                markets_per_day=20,
+            )
+            db_session.add(r)
+            db_session.flush()
+        return r
 
     try:
         today = (
@@ -171,10 +199,7 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
             else datetime.now(timezone.utc).date()
         )
 
-        # Bir sonraki iş günü (Cumartesi → Pazartesi, Pazar → Pazartesi)
-        next_day = today + timedelta(days=1)
-        while next_day.weekday() >= 5:  # 5=Cumartesi, 6=Pazar
-            next_day += timedelta(days=1)
+        next_day = get_next_workday(today)
 
         with Session(sync_engine) as db:
             # Bugün tamamlanmamış tüm durakları bul
@@ -193,9 +218,8 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
                 return {"status": "ok", "date": str(today), "rolled_over": 0}
 
             # Kullanıcı bazlı grupla
-            stops_by_user: dict = {}
+            stops_by_user = {}
             for stop in unvisited_stops:
-                # Rotanın kullanıcısını bul
                 route_result = db.execute(
                     select(DailyRoute).where(DailyRoute.id == stop.route_id)
                 )
@@ -205,37 +229,13 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
                 stops_by_user.setdefault(route.user_id, []).append(stop)
 
             total_rolled = 0
+            DAILY_CAP = 25
 
-            for user_id, stops in stops_by_user.items():
-                # Ertesi günün rotasını bul veya oluştur
-                next_route_result = db.execute(
-                    select(DailyRoute).where(
-                        DailyRoute.user_id == user_id,
-                        DailyRoute.date == next_day,
-                    )
-                )
-                next_route = next_route_result.scalar_one_or_none()
+            for user_id, user_leftovers in stops_by_user.items():
+                # 1. Yarının rotasını al veya oluştur
+                next_route = get_or_create_route(db, user_id, next_day)
 
-                if not next_route:
-                    # Ertesi gün rotası yoksa oluştur
-                    next_route = DailyRoute(
-                        user_id=user_id,
-                        date=next_day,
-                        status="planned",
-                        markets_per_day=20,
-                    )
-                    db.add(next_route)
-                    db.flush()
-
-                # Ertesi günün mevcut durak sayısını al
-                existing_count_result = db.execute(
-                    select(func.count(RouteStop.id)).where(
-                        RouteStop.route_id == next_route.id
-                    )
-                )
-                existing_count = existing_count_result.scalar_one()
-
-                # Mevcut durakların order_index'ini kaydır (yeni duraklar başa gelecek)
+                # 2. Yarının mevcut duraklarını (pending/rolled_over) çek
                 existing_stops_result = db.execute(
                     select(RouteStop).where(
                         RouteStop.route_id == next_route.id,
@@ -244,26 +244,80 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
                 )
                 existing_stops = existing_stops_result.scalars().all()
 
-                rolled_count = len(stops)
-
-                # Mevcut pending durakları kaydır
-                for es in existing_stops:
-                    es.order_index += rolled_count
-
-                # Kaydırılan durakları ertesi güne taşı (yeni RouteStop olarak)
-                for idx, stop in enumerate(stops):
+                # 3. Bugünün sarkan duraklarını yeni nesne olarak hazırla
+                new_stops = []
+                for stop in user_leftovers:
                     new_stop = RouteStop(
                         route_id=next_route.id,
                         market_id=stop.market_id,
-                        order_index=idx,
                         status="rolled_over",
                         rolled_from_date=today,
+                        rollover_count=(stop.rollover_count or 0) + 1,
                     )
-                    db.add(new_stop)
-                    # Eski durağı rolled_over olarak işaretle
-                    stop.status = "rolled_over"
+                    new_stops.append(new_stop)
+                    stop.status = "rolled_over"  # Bugününkini güncelliyoruz
 
-                total_rolled += rolled_count
+                # Tüm adayları birleştir (öncelik sarkanlarda)
+                all_candidates = new_stops + existing_stops
+
+                stops_to_keep = all_candidates[:DAILY_CAP]
+                stops_to_push = all_candidates[DAILY_CAP:]
+
+                # 4. Limiti aşan durakları bir sonraki güne (next_day + 1 iş günü) ötele
+                if stops_to_push:
+                    day_after = get_next_workday(next_day)
+                    day_after_route = get_or_create_route(db, user_id, day_after)
+
+                    for s in stops_to_push:
+                        # Eğer veritabanında zaten kayıtlı bir durak ise sadece route_id'sini ve rollover değerini güncelle
+                        if s.id is not None:
+                            s.route_id = day_after_route.id
+                            s.status = "rolled_over"
+                            s.rolled_from_date = today
+                            s.rollover_count = (s.rollover_count or 0) + 1
+                        else:
+                            # Sarkanlar arasından buraya sarkan varsa yeni nesneyi ekle
+                            s.route_id = day_after_route.id
+                            db.add(s)
+
+                # 5. Yarın için tutulacak durakları ekle ve coğrafi sırala
+                for s in stops_to_keep:
+                    if s.id is None:
+                        db.add(s)
+
+                # Coğrafi sıralama
+                market_ids = [s.market_id for s in stops_to_keep]
+                if market_ids:
+                    mkt_coords = db.execute(
+                        select(
+                            Market,
+                            ST_Y(Market.location).label("lat"),
+                            ST_X(Market.location).label("lng"),
+                        ).where(Market.id.in_(market_ids))
+                    ).all()
+
+                    coords_map = {}
+                    for row in mkt_coords:
+                        m, lat, lng = row[0], row[1], row[2]
+                        if lat is not None and lng is not None:
+                            coords_map[m.id] = (lat, lng)
+
+                    sort_input = []
+                    for s in stops_to_keep:
+                        lat, lng = coords_map.get(s.market_id, (36.8969, 30.7133))
+                        sort_input.append((s.market_id, lat, lng))
+
+                    ANTALYA_LAT, ANTALYA_LNG = 36.8969, 30.7133
+                    sorted_tuples = _osrm_sort_route(sort_input, ANTALYA_LAT, ANTALYA_LNG)
+                    sorted_ids = [t[0] for t in sorted_tuples]
+
+                    for s in stops_to_keep:
+                        if s.market_id in sorted_ids:
+                            s.order_index = sorted_ids.index(s.market_id)
+                        else:
+                            s.order_index = 999
+
+                total_rolled += len(new_stops)
 
             db.commit()
 

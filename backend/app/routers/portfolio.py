@@ -15,6 +15,7 @@ from app.routers.auth import get_current_user
 from app.routers.markets import _market_to_out, _fetch_market_out
 from app.schemas.schemas import (
     MarketAssignmentBulkCreate,
+    MarketAssignmentPolygonCreate,
     MarketAssignmentOut,
     MarketOut,
     PortfolioOut,
@@ -236,3 +237,139 @@ async def clear_portfolio(
     await db.execute(
         delete(MarketAssignment).where(MarketAssignment.user_id == user_id)
     )
+
+
+# ─── Poligon ile market atama ──────────────────────────────────────────────────
+
+@router.post("/assign-by-polygon", response_model=list[MarketAssignmentOut], status_code=status.HTTP_201_CREATED)
+async def assign_by_polygon(
+    payload: MarketAssignmentPolygonCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Poligon (koordinat listesi) içinde kalan tüm marketleri temsilciye ata."""
+    _require_manager(current_user)
+    
+    from geoalchemy2.functions import ST_Contains, ST_GeomFromText
+
+    # Temsilciyi doğrula
+    user_result = await db.execute(select(User).where(User.id == payload.user_id))
+    if not user_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı")
+
+    coords = payload.polygon_coords
+    if len(coords) < 3:
+        raise HTTPException(status_code=400, detail="Poligon en az 3 noktadan oluşmalıdır")
+
+    # WKT Poligon formatı oluştur (Boylam Enlem formatında - X Y)
+    # PostGIS WKT koordinat sıralaması: Lng Lat
+    points = [f"{c.longitude} {c.latitude}" for c in coords]
+    
+    # Poligon kapalı olmalıdır: İlk nokta ile son nokta aynı olmalıdır
+    if points[0] != points[-1]:
+        points.append(points[0])
+        
+    wkt_poly = f"POLYGON(({', '.join(points)}))"
+
+    # Poligonun içindeki marketleri bul
+    query = select(Market).where(
+        ST_Contains(ST_GeomFromText(wkt_poly, 4326), Market.location)
+    )
+    result = await db.execute(query)
+    markets = result.scalars().all()
+
+    if not markets:
+        return []
+
+    market_ids = [m.id for m in markets]
+
+    # Zaten atanmış olanları bul
+    existing_result = await db.execute(
+        select(MarketAssignment.market_id).where(
+            MarketAssignment.user_id == payload.user_id,
+            MarketAssignment.market_id.in_(market_ids),
+        )
+    )
+    already_assigned = set(existing_result.scalars().all())
+
+    created_assignments = []
+    for m in markets:
+        if m.id not in already_assigned:
+            assignment = MarketAssignment(
+                user_id=payload.user_id,
+                market_id=m.id,
+                assigned_by=current_user.id,
+            )
+            db.add(assignment)
+            created_assignments.append(assignment)
+
+    await db.flush()
+
+    # Oluşan atama kayıtlarını döndür
+    out_list = []
+    for a in created_assignments:
+        # MarketOut ilişkisiyle beraber dönmek için
+        m = next(mkt for mkt in markets if mkt.id == a.market_id)
+        # Koordinatları elle parse et
+        lat, lng = 0.0, 0.0
+        if m.location is not None:
+            try:
+                from geoalchemy2.shape import to_shape
+                point = to_shape(m.location)
+                lat, lng = point.y, point.x
+            except Exception:
+                pass
+        from app.routers.markets import _market_to_out_coords
+        mkt_out = _market_to_out_coords(m, lat, lng)
+        
+        out_list.append(
+            MarketAssignmentOut(
+                id=a.id,
+                user_id=a.user_id,
+                market_id=a.market_id,
+                assigned_at=a.assigned_at,
+                assigned_by=a.assigned_by,
+                market=mkt_out,
+            )
+        )
+
+    return out_list
+
+
+@router.post("/preview-polygon", response_model=list[MarketOut])
+async def preview_polygon(
+    payload: MarketAssignmentPolygonCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Poligon içinde kalan tüm marketleri listele (önizleme)."""
+    _require_manager(current_user)
+    
+    from geoalchemy2.functions import ST_Contains, ST_GeomFromText
+
+    coords = payload.polygon_coords
+    if len(coords) < 3:
+        raise HTTPException(status_code=400, detail="Poligon en az 3 noktadan oluşmalıdır")
+
+    points = [f"{c.longitude} {c.latitude}" for c in coords]
+    if points[0] != points[-1]:
+        points.append(points[0])
+    wkt_poly = f"POLYGON(({', '.join(points)}))"
+
+    # Koordinatları SQL'de çözerek çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    query = select(
+        Market,
+        ST_Y(Market.location).label("lat"),
+        ST_X(Market.location).label("lng")
+    ).where(
+        ST_Contains(ST_GeomFromText(wkt_poly, 4326), Market.location)
+    )
+    result = await db.execute(query)
+    rows = result.all()
+
+    from app.routers.markets import _market_to_out_coords
+    return [
+        _market_to_out_coords(row[0], row[1] or 0.0, row[2] or 0.0)
+        for row in rows
+    ]

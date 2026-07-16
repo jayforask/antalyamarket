@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # Google Maps
     GOOGLE_MAPS_API_KEY: str = ""
 
+    # OSRM Routing
+    OSRM_URL: str = "https://router.project-osrm.org"
+
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
 

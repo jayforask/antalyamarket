@@ -27,6 +27,16 @@ async def _run_migrations() -> None:
             ADD COLUMN IF NOT EXISTS current_lng FLOAT,
             ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMPTZ
         """,
+        # RouteStop tablosuna rollover_count ekle (v1.2)
+        """
+        ALTER TABLE route_stops
+            ADD COLUMN IF NOT EXISTS rollover_count INT DEFAULT 0 NOT NULL
+        """,
+        # Users tablosuna work_mode ekle (v1.3)
+        """
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS work_mode VARCHAR(32) DEFAULT 'hybrid' NOT NULL
+        """,
     ]
 
     async with AsyncSessionLocal() as session:

@@ -15,7 +15,7 @@ from geoalchemy2.functions import ST_X, ST_Y
 from app.core.database import get_db
 from app.models.models import DailyRoute, Market, RouteStop, Shift, User, Visit
 from app.routers.auth import get_current_user
-from app.routers.routes import _nearest_neighbor_sort, _build_route_out
+from app.routers.routes import _nearest_neighbor_sort, _build_route_out, _osrm_sort_route
 from app.schemas.schemas import (
     DailyRouteOut, ShiftEnd, ShiftLocationUpdate, ShiftOut, ShiftStart,
     UserDayDetailOut, UserDayStats, ShiftDateItem,
@@ -443,7 +443,7 @@ async def _reorder_route_by_gps(
         lat, lng = coord_map.get(stop.market_id, (current_lat, current_lng))
         coords.append((stop.market_id, lat, lng))
 
-    sorted_coords = _nearest_neighbor_sort(coords, current_lat, current_lng)
+    sorted_coords = _osrm_sort_route(coords, current_lat, current_lng)
     sorted_market_ids = [c[0] for c in sorted_coords]
 
     # order_index güncelle

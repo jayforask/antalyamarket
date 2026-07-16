@@ -43,6 +43,7 @@ interface RouteStopApi {
   status: StopStatus;
   rolled_from_date?: string;
   visited_at?: string;
+  rollover_count?: number;
   market?: MarketInfo;
 }
 
@@ -608,8 +609,15 @@ function StopCard({
               {stop.market?.name ?? `Market #${stop.market_id.slice(0, 8)}`}
             </p>
             {isRolledOver && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400 shrink-0">
-                Kayan
+              <span className={cn(
+                "text-[10px] px-1.5 py-0.5 rounded shrink-0 font-medium",
+                stop.rollover_count && stop.rollover_count > 1
+                  ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 font-bold animate-pulse"
+                  : "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
+              )}>
+                {stop.rollover_count && stop.rollover_count > 1
+                  ? `🚨 Gecikmiş (${stop.rollover_count} Gün)`
+                  : "Kayan"}
               </span>
             )}
           </div>

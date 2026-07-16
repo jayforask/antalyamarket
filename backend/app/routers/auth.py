@@ -1,3 +1,4 @@
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,7 @@ from app.core.security import (
     create_refresh_token, decode_token,
 )
 from app.models.models import User
-from app.schemas.schemas import LoginRequest, TokenResponse, RefreshRequest, UserOut, UserCreate, UserListOut
+from app.schemas.schemas import LoginRequest, TokenResponse, RefreshRequest, UserOut, UserCreate, UserUpdate, UserListOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 bearer_scheme = HTTPBearer()
@@ -105,6 +106,7 @@ async def register_user(
         email=payload.email,
         hashed_password=hash_password(payload.password),
         role=payload.role,
+        work_mode=payload.work_mode,
         is_active=True,
         created_at=datetime.now(timezone.utc),
     )
@@ -148,3 +150,44 @@ async def delete_user(
 
     await db.delete(user)
     await db.commit()
+
+
+@router.put("/users/{user_id}", response_model=UserOut)
+async def update_user(
+    user_id: UUID,
+    payload: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Kullanıcı bilgilerini güncelle — sadece admin."""
+    if current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sadece admin güncelleyebilir")
+
+    from uuid import UUID as uuid_mod
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı")
+
+    if payload.name is not None:
+        user.name = payload.name
+    if payload.email is not None:
+        if payload.email != user.email:
+            dup_res = await db.execute(select(User).where(User.email == payload.email))
+            if dup_res.scalar_one_or_none():
+                raise HTTPException(status_code=409, detail="Bu e-posta zaten kayıtlı")
+        user.email = payload.email
+    if payload.role is not None:
+        user.role = payload.role
+    if payload.work_mode is not None:
+        user.work_mode = payload.work_mode
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+    if payload.password is not None and payload.password.strip():
+        from app.core.security import hash_password
+        user.hashed_password = hash_password(payload.password)
+
+    await db.commit()
+    await db.refresh(user)
+    return user
+

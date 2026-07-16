@@ -29,6 +29,7 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     role: str = "field_rep"  # admin | manager | field_rep
+    work_mode: str = "hybrid"  # hunter | farmer | hybrid
 
 
 class UserOut(BaseModel):
@@ -37,9 +38,19 @@ class UserOut(BaseModel):
     email: EmailStr
     role: str
     is_active: bool
+    work_mode: str
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[str] = None
+    work_mode: Optional[str] = None
+    is_active: Optional[bool] = None
+    password: Optional[str] = None
 
 
 class UserListOut(BaseModel):
@@ -269,7 +280,10 @@ class RouteStopOut(BaseModel):
     status: str
     rolled_from_date: Optional[date] = None
     visited_at: Optional[datetime] = None
+    rollover_count: int = 0
     market: Optional[MarketOut] = None
+    distance_from_prev: Optional[float] = None
+    duration_from_prev: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -284,6 +298,9 @@ class DailyRouteOut(BaseModel):
     updated_at: datetime
     stops: List[RouteStopOut] = []
     user: Optional[UserOut] = None
+    total_distance: Optional[float] = None
+    total_duration: Optional[float] = None
+    polyline: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -305,3 +322,13 @@ class WeeklyRoutesOut(BaseModel):
     routes: List[DailyRouteOut]
     total_markets: int
     total_days: int
+
+
+class CoordinatePair(BaseModel):
+    latitude: float
+    longitude: float
+
+
+class MarketAssignmentPolygonCreate(BaseModel):
+    user_id: UUID
+    polygon_coords: List[CoordinatePair]

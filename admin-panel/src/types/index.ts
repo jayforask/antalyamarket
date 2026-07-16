@@ -1,12 +1,14 @@
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 export type UserRole = "admin" | "manager" | "field_rep";
+export type UserWorkMode = "hunter" | "farmer" | "hybrid";
 
 export interface User {
   id: string;
   name: string;
   email: string;
   role: UserRole;
+  work_mode?: UserWorkMode;
   created_at: string;
   avatar_url?: string;
 }

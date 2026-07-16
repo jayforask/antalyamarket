@@ -31,6 +31,7 @@ const navItems = [
   { label: "Harita Takibi", href: "/maps", icon: Map },
   { label: "Rota Planlama", href: "/routes", icon: Route },
   { label: "Portföy Yönetimi", href: "/portfolio", icon: Briefcase },
+  { label: "Haritadan Atama", href: "/polygon-assign", icon: MapPin },
   { label: "Haftalık Rotalar", href: "/weekly-routes", icon: CalendarDays },
 ];
 

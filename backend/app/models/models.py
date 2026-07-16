@@ -31,6 +31,7 @@ class User(Base):
     email = Column(String(256), unique=True, nullable=False, index=True)
     hashed_password = Column(String(256), nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
+    work_mode = Column(String(32), default="hybrid", nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     visits = relationship("Visit", back_populates="user", lazy="dynamic")
@@ -211,6 +212,7 @@ class RouteStop(Base):
     )
     rolled_from_date = Column(Date, nullable=True)   # hangi günden kaydığı
     visited_at = Column(DateTime(timezone=True), nullable=True)
+    rollover_count = Column(Integer, default=0, nullable=False)
 
     route = relationship("DailyRoute", back_populates="stops")
     market = relationship("Market")

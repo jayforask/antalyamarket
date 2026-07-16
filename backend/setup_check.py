@@ -57,6 +57,7 @@ def main():
         ("celery", "celery"),
         ("boto3", "boto3"),
         ("asyncpg", "asyncpg"),
+        ("httpx", "httpx"),
     ]
     for import_name, pkg_name in packages:
         try:
