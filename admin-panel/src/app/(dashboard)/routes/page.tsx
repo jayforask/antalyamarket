@@ -24,6 +24,61 @@ import { cn } from "@/lib/utils";
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
 const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
 
+const CLUSTER_COLORS = ["#ef4444", "#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#ec4899"];
+
+function kMeansClustering(markets: Market[], k: number) {
+  if (markets.length === 0) return [];
+  if (markets.length <= k) {
+    return markets.map((m, i) => ({ clusterIndex: i, color: CLUSTER_COLORS[i % CLUSTER_COLORS.length], markets: [m] }));
+  }
+
+  // Centroidleri ilk elemanlardan seçelim
+  let centroids = markets.slice(0, k).map((m) => ({ lat: m.latitude, lng: m.longitude }));
+  let clusters: Market[][] = Array.from({ length: k }, () => []);
+  let assignments = new Array(markets.length).fill(-1);
+
+  const maxIterations = 15;
+  for (let iter = 0; iter < maxIterations; iter++) {
+    clusters = Array.from({ length: k }, () => []);
+    let changed = false;
+
+    for (let i = 0; i < markets.length; i++) {
+      const m = markets[i];
+      let minDist = Infinity;
+      let bestCluster = 0;
+      for (let c = 0; c < k; c++) {
+        const dist = Math.pow(m.latitude - centroids[c].lat, 2) + Math.pow(m.longitude - centroids[c].lng, 2);
+        if (dist < minDist) {
+          minDist = dist;
+          bestCluster = c;
+        }
+      }
+      clusters[bestCluster].push(m);
+      if (assignments[i] !== bestCluster) {
+        assignments[i] = bestCluster;
+        changed = true;
+      }
+    }
+
+    if (!changed) break;
+
+    for (let c = 0; c < k; c++) {
+      if (clusters[c].length > 0) {
+        const sumLat = clusters[c].reduce((sum, m) => sum + m.latitude, 0);
+        const sumLng = clusters[c].reduce((sum, m) => sum + m.longitude, 0);
+        centroids[c] = {
+          lat: sumLat / clusters[c].length,
+          lng: sumLng / clusters[c].length,
+        };
+      }
+    }
+  }
+
+  return clusters
+    .map((list, idx) => ({ clusterIndex: idx, color: CLUSTER_COLORS[idx % CLUSTER_COLORS.length], markets: list }))
+    .filter((c) => c.markets.length > 0);
+}
+
 // DailyRouteApi → harita için polyline uyumlu tip dönüşümü
 function toRouteForMap(r: DailyRouteApi) {
   return {
@@ -43,6 +98,7 @@ function toRouteForMap(r: DailyRouteApi) {
     })),
     total_distance: undefined,
     total_duration: undefined,
+    polyline: (r as any).polyline,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -75,50 +131,107 @@ export default function RoutesPage() {
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>([]);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optimizedRoute, setOptimizedRoute] = useState<DailyRouteApi | null>(null);
+  const [portfolioMarkets, setPortfolioMarkets] = useState<Market[]>([]);
+  const [loadingPortfolio, setLoadingPortfolio] = useState(false);
+  const [clusterCount, setClusterCount] = useState(5);
+
+  const [isSaving, setIsSaving] = useState(false);
 
   // Temsilcileri ve bugünün rotalarını yükle
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
+  const fetchRoutesAndReps = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { data: usersData } = await apiClient.get<{ users: User[] }>("/auth/users");
+      const reps = (usersData.users ?? []).filter((u: User) => u.role === "field_rep");
+      setFieldReps(reps);
+      if (reps.length > 0) setNewRepId((prev) => prev || reps[0].id);
+
       try {
-        // Temsilcileri çek
-        const { data: usersData } = await apiClient.get<{ users: User[] }>("/auth/users");
-        const reps = (usersData.users ?? []).filter((u: User) => u.role === "field_rep");
-        setFieldReps(reps);
-        if (reps.length > 0) setNewRepId(reps[0].id);
-
-        // Marketleri çek (yeni rota formu için)
-        try {
-          const { data: mkts } = await apiClient.get("/markets/search", {
-            params: { page: 1, page_size: 100 },
-          });
-          setMarkets(mkts.items ?? []);
-        } catch {
-          setMarkets([]);
-        }
-
-        // Bugünkü rotaları her temsilci için çek
-        const today = new Date().toISOString().split("T")[0];
-        const routeResults = await Promise.allSettled(
-          reps.map((rep: User) =>
-            apiClient
-              .get<DailyRouteApi>(`/routes/${rep.id}/${today}`)
-              .then((r) => r.data)
-          )
-        );
-        const loaded: DailyRouteApi[] = routeResults
-          .filter((r): r is PromiseFulfilledResult<DailyRouteApi> => r.status === "fulfilled")
-          .map((r) => r.value);
-        setRoutes(loaded);
-        if (loaded.length > 0) setSelectedRoute(loaded[0]);
+        const { data: mkts } = await apiClient.get("/markets/search", {
+          params: { page: 1, page_size: 100 },
+        });
+        setMarkets(mkts.items ?? []);
       } catch {
-        // hata sessizce geçer
+        setMarkets([]);
+      }
+
+      const today = new Date().toISOString().split("T")[0];
+      const routeResults = await Promise.allSettled(
+        reps.map((rep: User) =>
+          apiClient
+            .get<DailyRouteApi>(`/routes/${rep.id}/${today}`)
+            .then((r) => r.data)
+        )
+      );
+      const loaded: DailyRouteApi[] = routeResults
+        .filter((r): r is PromiseFulfilledResult<DailyRouteApi> => r.status === "fulfilled")
+        .map((r) => r.value);
+      setRoutes(loaded);
+      setSelectedRoute((prev) => {
+        if (prev) {
+          const updated = loaded.find((r) => r.id === prev.id);
+          return updated || prev;
+        }
+        return loaded.length > 0 ? loaded[0] : null;
+      });
+    } catch {
+      // hata sessizce geçer
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRoutesAndReps();
+  }, [fetchRoutesAndReps]);
+
+  // Seçilen temsilcinin portföyünü çek
+  useEffect(() => {
+    if (!newRepId) {
+      setPortfolioMarkets([]);
+      return;
+    }
+    async function loadPortfolio() {
+      setLoadingPortfolio(true);
+      try {
+        const { data } = await apiClient.get(`/portfolio/${newRepId}`);
+        setPortfolioMarkets(data.markets ?? []);
+      } catch {
+        setPortfolioMarkets([]);
       } finally {
-        setLoading(false);
+        setLoadingPortfolio(false);
       }
     }
-    load();
-  }, []);
+    loadPortfolio();
+  }, [newRepId]);
+
+  // Manuel planlanan rotayı kaydet ve aktifleştir
+  async function handleSaveRoute() {
+    if (!newRepId || selectedMarkets.length === 0 || !newDate) return;
+    setIsSaving(true);
+    try {
+      const { data } = await apiClient.post<DailyRouteApi>("/routes/save-manual", {
+        user_id: newRepId,
+        date: newDate,
+        market_ids: selectedMarkets,
+      });
+
+      setSelectedMarkets([]);
+      setOptimizedRoute(null);
+
+      await fetchRoutesAndReps();
+      setTab("existing");
+
+      if (data) {
+        setSelectedRoute(data);
+      }
+    } catch (e) {
+      console.error("Rota kaydedilirken hata oluştu:", e);
+      alert("Rota kaydedilemedi. Lütfen yetkilerinizi veya girdileri kontrol edin.");
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
   function toggleMarket(id: string) {
     setSelectedMarkets((prev) =>
@@ -174,6 +287,42 @@ export default function RoutesPage() {
 
   const displayRoute = tab === "existing" ? selectedRoute : optimizedRoute;
   const displayRouteForMap = displayRoute ? toRouteForMap(displayRoute) : null;
+
+  // Akıllı coğrafi kümeleme (K-Means)
+  const smartClusters = kMeansClustering(portfolioMarkets, clusterCount);
+
+  // Her marketin hangi kümede olduğunu ve rengini tutan nesne
+  const marketClusterMap: Record<string, { index: number; color: string }> = {};
+  smartClusters.forEach((c) => {
+    c.markets.forEach((m) => {
+      marketClusterMap[m.id] = { index: c.clusterIndex, color: c.color };
+    });
+  });
+
+  const portfolioIds = new Set(portfolioMarkets.map((m) => m.id));
+  const otherMarkets = markets.filter((m) => !portfolioIds.has(m.id));
+  const isAllPortfolioSelected =
+    portfolioMarkets.length > 0 &&
+    portfolioMarkets.every((m) => selectedMarkets.includes(m.id));
+
+  // Toplu seçme/bırakma yardımcı fonksiyonları
+  const handleSelectAllPortfolio = () => {
+    const portfolioIdsArr = portfolioMarkets.map((m) => m.id);
+    setSelectedMarkets((prev) => Array.from(new Set([...prev, ...portfolioIdsArr])));
+  };
+
+  const handleDeselectAllPortfolio = () => {
+    const portfolioIdsArr = portfolioMarkets.map((m) => m.id);
+    setSelectedMarkets((prev) => prev.filter((id) => !portfolioIdsArr.includes(id)));
+  };
+
+  const handleSelectCluster = (clusterMarkets: Market[]) => {
+    setSelectedMarkets(clusterMarkets.map((m) => m.id));
+  };
+
+  const handleClearAll = () => {
+    setSelectedMarkets([]);
+  };
 
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-theme(spacing.16)-theme(spacing.12))]">
@@ -265,38 +414,175 @@ export default function RoutesPage() {
                 />
               </div>
 
+              {/* Akıllı Rota Bölme */}
+              {portfolioMarkets.length > 0 && (
+                <div className="space-y-2 border-t border-b border-[var(--border)] py-3">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-[var(--foreground)] flex items-center gap-1.5">
+                      <Navigation className="w-3.5 h-3.5 text-[var(--primary)]" />
+                      Akıllı Bölge Bölme
+                    </label>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setClusterCount(prev => Math.max(2, prev - 1))}
+                        className="w-5 h-5 bg-[var(--muted)] hover:bg-[var(--border)] rounded text-xs flex items-center justify-center font-bold"
+                      >
+                        -
+                      </button>
+                      <span className="text-xs font-bold w-4 text-center">{clusterCount}</span>
+                      <button
+                        type="button"
+                        onClick={() => setClusterCount(prev => Math.min(6, prev + 1))}
+                        className="w-5 h-5 bg-[var(--muted)] hover:bg-[var(--border)] rounded text-xs flex items-center justify-center font-bold"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-[var(--muted-foreground)]">
+                    Portföyü coğrafi olarak {clusterCount} bölgeye ayırdık. Bir bölge seçerek rota oluşturabilirsiniz:
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {smartClusters.map((cluster) => {
+                      const isSelected = cluster.markets.every((m) => selectedMarkets.includes(m.id)) && selectedMarkets.length === cluster.markets.length;
+                      return (
+                        <button
+                          key={cluster.clusterIndex}
+                          type="button"
+                          onClick={() => handleSelectCluster(cluster.markets)}
+                          className={cn(
+                            "flex flex-col gap-1 p-2 rounded-lg border text-left text-xs transition-all relative overflow-hidden",
+                            isSelected
+                              ? "border-[var(--primary)] bg-[var(--primary)]/10 ring-2 ring-[var(--primary)]/20"
+                              : "border-[var(--border)] bg-[var(--background)] hover:bg-[var(--muted)]"
+                          )}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: cluster.color }}
+                            />
+                            <span className="font-semibold text-[var(--foreground)]">Bölge {cluster.clusterIndex + 1}</span>
+                          </div>
+                          <span className="text-[10px] text-[var(--muted-foreground)] pl-4">
+                            {cluster.markets.length} Market
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* Market seçimi */}
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-[var(--muted-foreground)]">
-                  Marketler ({selectedMarkets.length} seçili)
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-medium text-[var(--muted-foreground)]">
+                    Marketler ({selectedMarkets.length} seçili)
+                  </label>
+                  {selectedMarkets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleClearAll}
+                      className="text-[10px] text-red-500 hover:underline font-medium"
+                    >
+                      Seçimleri Temizle
+                    </button>
+                  )}
+                </div>
                 <div className="space-y-1 max-h-48 overflow-y-auto pr-1">
                   {markets.length === 0 ? (
                     <p className="text-xs text-[var(--muted-foreground)] text-center py-4">Market yükleniyor...</p>
                   ) : (
-                    markets.map((m) => (
-                      <button
-                        key={m.id}
-                        onClick={() => toggleMarket(m.id)}
-                        className={cn(
-                          "w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center gap-2",
-                          selectedMarkets.includes(m.id)
-                            ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)]"
-                            : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                    <>
+                      {/* 1. Temsilci Portföyü */}
+                      <div className="sticky top-0 bg-[var(--card)] z-10 py-1 flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-[var(--primary)] uppercase tracking-wider">
+                          Temsilci Portföyü ({portfolioMarkets.length})
+                        </span>
+                        {portfolioMarkets.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={isAllPortfolioSelected ? handleDeselectAllPortfolio : handleSelectAllPortfolio}
+                            className="text-[10px] text-[var(--primary)] hover:underline font-semibold"
+                          >
+                            {isAllPortfolioSelected ? "Seçimleri Kaldır" : "Tümünü Seç"}
+                          </button>
                         )}
-                      >
-                        <Plus
-                          className={cn(
-                            "w-3 h-3 shrink-0 transition-transform",
-                            selectedMarkets.includes(m.id) && "rotate-45 text-[var(--primary)]"
-                          )}
-                        />
-                        <div className="min-w-0">
-                          <p className="font-medium truncate text-[var(--foreground)]">{m.name}</p>
-                          <p className="text-[var(--muted-foreground)] truncate">{m.address}</p>
-                        </div>
-                      </button>
-                    ))
+                      </div>
+
+                      {loadingPortfolio ? (
+                        <p className="text-[11px] text-[var(--muted-foreground)] text-center py-2">Portföy yükleniyor...</p>
+                      ) : portfolioMarkets.length === 0 ? (
+                        <p className="text-[11px] text-[var(--muted-foreground)] text-center py-2">Portföyünde market bulunmuyor.</p>
+                      ) : (
+                        portfolioMarkets.map((m) => (
+                          <button
+                            key={m.id}
+                            onClick={() => toggleMarket(m.id)}
+                            className={cn(
+                              "w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center gap-2 relative overflow-hidden",
+                              selectedMarkets.includes(m.id)
+                                ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)]"
+                                : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                            )}
+                          >
+                            <Plus
+                              className={cn(
+                                "w-3 h-3 shrink-0 transition-transform",
+                                selectedMarkets.includes(m.id) && "rotate-45 text-[var(--primary)]"
+                              )}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <p className="font-semibold truncate text-[var(--foreground)]">{m.name}</p>
+                                <span className="text-[9px] px-1 py-0.2 bg-emerald-100 text-emerald-700 dark:bg-emerald-950/55 dark:text-emerald-400 rounded shrink-0 font-medium">
+                                  Portföy
+                                </span>
+                              </div>
+                              <p className="text-[var(--muted-foreground)] text-[10px] truncate mt-0.5">{m.address}</p>
+                            </div>
+                          </button>
+                        ))
+                      )}
+
+                      {/* 2. Diğer Marketler */}
+                      {otherMarkets.length > 0 && (
+                        <>
+                          <div className="sticky top-0 bg-[var(--card)] z-10 py-1 pt-3 border-t border-[var(--border)] mt-2 flex items-center justify-between">
+                            <span className="text-[11px] font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">
+                              Diğer Marketler ({otherMarkets.length})
+                            </span>
+                          </div>
+                          <div className="space-y-1 mt-1">
+                            {otherMarkets.map((m) => (
+                              <button
+                                key={m.id}
+                                onClick={() => toggleMarket(m.id)}
+                                className={cn(
+                                  "w-full text-left px-3 py-2 rounded-lg border text-xs transition-colors flex items-center gap-2",
+                                  selectedMarkets.includes(m.id)
+                                    ? "border-[var(--primary)] bg-[var(--primary)]/10 text-[var(--foreground)]"
+                                    : "border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+                                )}
+                              >
+                                <Plus
+                                  className={cn(
+                                    "w-3 h-3 shrink-0 transition-transform",
+                                    selectedMarkets.includes(m.id) && "rotate-45 text-[var(--primary)]"
+                                  )}
+                                />
+                                <div className="min-w-0">
+                                  <p className="font-medium truncate text-[var(--foreground)]">{m.name}</p>
+                                  <p className="text-[var(--muted-foreground)] text-[10px] truncate mt-0.5">{m.address}</p>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -414,25 +700,32 @@ export default function RoutesPage() {
                 >
                   {/* Haritada market pinleri (yeni rota modunda) */}
                   {tab === "new" &&
-                    markets.map((m) => (
-                      <AdvancedMarker
-                        key={m.id}
-                        position={{ lat: m.latitude, lng: m.longitude }}
-                        onClick={() => toggleMarket(m.id)}
-                        title={m.name}
-                      >
-                        <div
-                          className={cn(
-                            "w-7 h-7 rounded-lg border-2 border-white shadow-md flex items-center justify-center cursor-pointer transition-transform hover:scale-110",
-                            selectedMarkets.includes(m.id)
-                              ? "bg-[var(--primary)]"
-                              : "bg-gray-400"
-                          )}
+                    portfolioMarkets.map((m) => {
+                      const clusterInfo = marketClusterMap[m.id];
+                      const isSelected = selectedMarkets.includes(m.id);
+                      return (
+                        <AdvancedMarker
+                          key={m.id}
+                          position={{ lat: m.latitude, lng: m.longitude }}
+                          onClick={() => toggleMarket(m.id)}
+                          title={`${m.name} (${clusterInfo ? `Bölge ${clusterInfo.index + 1}` : 'Portföy'})`}
                         >
-                          <MapPin className="w-3.5 h-3.5 text-white" />
-                        </div>
-                      </AdvancedMarker>
-                    ))}
+                          <div
+                            className={cn(
+                              "w-7 h-7 rounded-lg border-2 shadow-md flex items-center justify-center cursor-pointer transition-transform hover:scale-110",
+                              isSelected
+                                ? "border-white scale-110 ring-4 ring-black/40"
+                                : "border-white/70 opacity-80"
+                            )}
+                            style={{
+                              backgroundColor: clusterInfo?.color ?? "#9ca3af"
+                            }}
+                          >
+                            <MapPin className="w-3.5 h-3.5 text-white" />
+                          </div>
+                        </AdvancedMarker>
+                      );
+                    })}
 
                   {/* Seçili / mevcut rota çizgisi */}
                   {displayRouteForMap && <RoutePolyline route={displayRouteForMap} />}
@@ -526,6 +819,28 @@ export default function RoutesPage() {
                     </div>
                   ))}
               </div>
+
+              {tab === "new" && (
+                <div className="flex justify-end mt-4 pt-3 border-t border-[var(--border)]">
+                  <button
+                    onClick={handleSaveRoute}
+                    disabled={isSaving}
+                    className="px-4 py-2 bg-[var(--primary)] text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2"
+                  >
+                    {isSaving ? (
+                      <>
+                        <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        Kaydediliyor...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="w-3.5 h-3.5" />
+                        Rotayı Kaydet ve Aktifleştir
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

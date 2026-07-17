@@ -207,6 +207,73 @@ def _cluster_by_geography(
     return groups
 
 
+from pydantic import BaseModel
+
+class CreateDailyRouteRequest(BaseModel):
+    user_id: UUID
+    date: date
+    market_ids: list[UUID]
+
+
+@router.post("/save-manual", response_model=DailyRouteOut, status_code=status.HTTP_201_CREATED)
+async def create_daily_route(
+    payload: CreateDailyRouteRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Manuel olarak bir günlük rota oluşturur / kaydeder.
+    Eğer o gün için temsilcinin rotası varsa silinir ve yeniden oluşturulur.
+    """
+    if current_user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Yetkiniz yok")
+
+    # Kullanıcıyı doğrula
+    user_result = await db.execute(select(User).where(User.id == payload.user_id))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Kullanıcı bulunamadı")
+
+    # Varsa o günün mevcut rotalarını ve duraklarını sil
+    existing_routes_result = await db.execute(
+        select(DailyRoute.id).where(
+            DailyRoute.user_id == payload.user_id,
+            DailyRoute.date == payload.date,
+        )
+    )
+    existing_route_ids = existing_routes_result.scalars().all()
+    if existing_route_ids:
+        await db.execute(
+            delete(RouteStop).where(RouteStop.route_id.in_(existing_route_ids))
+        )
+        await db.execute(
+            delete(DailyRoute).where(DailyRoute.id.in_(existing_route_ids))
+        )
+
+    # Rota oluştur
+    route = DailyRoute(
+        user_id=payload.user_id,
+        date=payload.date,
+        status="planned",
+        markets_per_day=len(payload.market_ids),
+    )
+    db.add(route)
+    await db.flush()  # ID'yi almak için flush
+
+    # Durakları oluştur
+    for order_idx, market_id in enumerate(payload.market_ids):
+        stop = RouteStop(
+            route_id=route.id,
+            market_id=market_id,
+            order_index=order_idx,
+            status="pending",
+        )
+        db.add(stop)
+
+    await db.commit()
+    return await _build_route_out(route.id, db)
+
+
 # ─── Haftalık rota üretimi ────────────────────────────────────────────────────
 
 @router.post("/generate-weekly", response_model=WeeklyRoutesOut, status_code=status.HTTP_201_CREATED)

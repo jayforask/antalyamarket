@@ -19,7 +19,6 @@ type VisitItem = VisitForMarker;
 const API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
 const ANTALYA_CENTER = { lat: 36.8969, lng: 30.7133 };
 
-// DailyRouteApi → RoutePolyline için uyumlu tip dönüşümü
 function toRouteForMap(r: DailyRouteApi) {
   return {
     id: r.id,
@@ -38,6 +37,7 @@ function toRouteForMap(r: DailyRouteApi) {
     })),
     total_distance: undefined,
     total_duration: undefined,
+    polyline: (r as any).polyline,
     created_at: r.created_at,
     updated_at: r.updated_at,
   };

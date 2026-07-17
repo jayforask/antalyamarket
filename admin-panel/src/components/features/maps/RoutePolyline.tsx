@@ -24,6 +24,7 @@ export function RoutePolyline({
 }: RoutePolylineProps) {
   const map = useMap();
   const mapsLib = useMapsLibrary("maps");
+  const geometryLib = useMapsLibrary("geometry");
   const polylineRef = useRef<google.maps.Polyline | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
 
@@ -33,14 +34,27 @@ export function RoutePolyline({
   useEffect(() => {
     if (!map || !mapsLib) return;
 
-    // Durakların koordinatlarından path oluştur
-    const path = route.stops
-      .filter((s) => s.market?.latitude && s.market?.longitude)
-      .sort((a, b) => a.order_index - b.order_index)
-      .map((s) => ({
-        lat: s.market!.latitude,
-        lng: s.market!.longitude,
-      }));
+    // OSRM polylines varsa decode et, yoksa düz çizgi çiz
+    let path: google.maps.LatLng[] | { lat: number; lng: number }[] = [];
+
+    if (route.polyline && geometryLib) {
+      try {
+        path = geometryLib.encoding.decodePath(route.polyline);
+      } catch (e) {
+        console.error("Error decoding route polyline:", e);
+      }
+    }
+
+    // Fallback: polyline yoksa veya hata oluştuysa düz çizgi çiz
+    if (path.length === 0) {
+      path = route.stops
+        .filter((s) => s.market?.latitude && s.market?.longitude)
+        .sort((a, b) => a.order_index - b.order_index)
+        .map((s) => ({
+          lat: s.market!.latitude,
+          lng: s.market!.longitude,
+        }));
+    }
 
     if (path.length < 2) return;
 
