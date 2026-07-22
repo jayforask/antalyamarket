@@ -254,35 +254,48 @@ export default function RoutesPage() {
   async function handleOptimize() {
     if (selectedMarkets.length < 2 || !newRepId) return;
     setIsOptimizing(true);
-    await new Promise((r) => setTimeout(r, 800));
+    try {
+      const { data } = await apiClient.post<{ market_ids: string[] }>("/routes/optimize", {
+        market_ids: selectedMarkets,
+        start_lat: 36.8969,
+        start_lng: 30.7133,
+      });
 
-    const rep = fieldReps.find((r) => r.id === newRepId);
-    const stops = selectedMarkets.map((mid, i) => {
-      const market = markets.find((m) => m.id === mid);
-      return {
-        id: `new-s${i}`,
-        route_id: "new-r",
-        market_id: mid,
-        order_index: i,
-        status: "pending" as const,
-        market: market,
+      const sortedIds = data.market_ids;
+      setSelectedMarkets(sortedIds);
+
+      const rep = fieldReps.find((r) => r.id === newRepId);
+      const stops = sortedIds.map((mid, i) => {
+        const market = markets.find((m) => m.id === mid);
+        return {
+          id: `new-s${i}`,
+          route_id: "new-r",
+          market_id: mid,
+          order_index: i,
+          status: "pending" as const,
+          market: market,
+        };
+      });
+
+      const route: DailyRouteApi = {
+        id: "new-r",
+        user_id: newRepId,
+        user: rep,
+        date: newDate,
+        status: "planned",
+        markets_per_day: stops.length,
+        stops,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       };
-    });
 
-    const route: DailyRouteApi = {
-      id: "new-r",
-      user_id: newRepId,
-      user: rep,
-      date: newDate,
-      status: "planned",
-      markets_per_day: stops.length,
-      stops,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    setOptimizedRoute(route);
-    setIsOptimizing(false);
+      setOptimizedRoute(route);
+    } catch (e) {
+      console.error("Rota optimize edilirken hata oluştu:", e);
+      alert("Rota optimize edilemedi. Lütfen tekrar deneyin.");
+    } finally {
+      setIsOptimizing(false);
+    }
   }
 
   const displayRoute = tab === "existing" ? selectedRoute : optimizedRoute;

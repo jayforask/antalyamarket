@@ -130,14 +130,21 @@ def _osrm_sort_route(
 
         waypoints = data.get("waypoints", [])
         
-        # waypoints dizisi ziyaret sırasına göre sıralıdır.
-        # waypoint_index değerlerine göre sıralama.
-        # waypoint_index = 0 başlangıç noktasıdır, onu listeden çıkarıp kalanları market sırası yapacağız.
-        ordered_market_indices = []
-        for wp in waypoints:
-            idx = wp.get("waypoint_index")
-            if idx is not None and idx > 0:
-                ordered_market_indices.append(idx - 1)
+        # OSRM Trip API, waypoints dizisini giriş sırasına göre döndürür.
+        # Her waypoint içindeki waypoint_index ise o noktanın optimize edilmiş rotadaki sırasını belirtir.
+        # Giriş indekslerini (input_idx - 1) ve bunların optimize edilmiş sırasını (waypoint_index) çiftler halinde toplayıp
+        # waypoint_index değerine göre sıralayarak gerçek ziyaret sırasını elde ediyoruz.
+        market_waypoint_pairs = []
+        for input_idx, wp in enumerate(waypoints):
+            if input_idx == 0:
+                continue  # Başlangıç noktasını atla
+            wp_idx = wp.get("waypoint_index")
+            if wp_idx is not None:
+                market_waypoint_pairs.append((input_idx - 1, wp_idx))
+
+        # Optimize edilmiş sıraya (waypoint_index) göre sırala
+        market_waypoint_pairs.sort(key=lambda x: x[1])
+        ordered_market_indices = [pair[0] for pair in market_waypoint_pairs]
 
         # Eğer dönen indeksler uyuşmazsa fallback yapalım.
         if len(ordered_market_indices) != len(markets):
@@ -215,6 +222,65 @@ class CreateDailyRouteRequest(BaseModel):
     market_ids: list[UUID]
 
 
+class OptimizeRouteRequest(BaseModel):
+    market_ids: list[UUID]
+    start_lat: float
+    start_lng: float
+
+class OptimizeRouteResponse(BaseModel):
+    market_ids: list[UUID]
+
+
+@router.post("/optimize", response_model=OptimizeRouteResponse)
+async def optimize_route_endpoint(
+    payload: OptimizeRouteRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Verilen market listesini ve başlangıç koordinatını OSRM/Nearest Neighbor ile en verimli ziyaret sırasına sokar.
+    """
+    if current_user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Yetkiniz yok")
+
+    if not payload.market_ids:
+        return OptimizeRouteResponse(market_ids=[])
+
+    # Market koordinatlarını çek
+    from geoalchemy2.functions import ST_X, ST_Y
+    mkt_result = await db.execute(
+        select(
+            Market,
+            ST_Y(Market.location).label("lat"),
+            ST_X(Market.location).label("lng"),
+        ).where(Market.id.in_(payload.market_ids))
+    )
+    
+    # Gelen marketleri map'le
+    coord_map = {
+        row[0].id: (row[1] or payload.start_lat, row[2] or payload.start_lng)
+        for row in mkt_result.all()
+    }
+    
+    markets_to_sort = []
+    seen = set()
+    for mid in payload.market_ids:
+        if mid in coord_map and mid not in seen:
+            lat, lng = coord_map[mid]
+            markets_to_sort.append((mid, lat, lng))
+            seen.add(mid)
+
+    # Başlangıç noktasını doğrula ve gerekirse default yap
+    start_lat, start_lng = payload.start_lat, payload.start_lng
+    if not (35.0 <= start_lat <= 38.5 and 29.0 <= start_lng <= 33.5):
+        start_lat, start_lng = 36.8969, 30.7133
+        
+    sorted_coords = _osrm_sort_route(markets_to_sort, start_lat, start_lng)
+    sorted_market_ids = [c[0] for c in sorted_coords]
+    
+    return OptimizeRouteResponse(market_ids=sorted_market_ids)
+
+
 @router.post("/save-manual", response_model=DailyRouteOut, status_code=status.HTTP_201_CREATED)
 async def create_daily_route(
     payload: CreateDailyRouteRequest,
@@ -250,18 +316,26 @@ async def create_daily_route(
             delete(DailyRoute).where(DailyRoute.id.in_(existing_route_ids))
         )
 
+    # Market listesini mükerrer kayıtlardan arındır
+    unique_market_ids = []
+    seen = set()
+    for mid in payload.market_ids:
+        if mid not in seen:
+            unique_market_ids.append(mid)
+            seen.add(mid)
+
     # Rota oluştur
     route = DailyRoute(
         user_id=payload.user_id,
         date=payload.date,
         status="planned",
-        markets_per_day=len(payload.market_ids),
+        markets_per_day=len(unique_market_ids),
     )
     db.add(route)
     await db.flush()  # ID'yi almak için flush
 
     # Durakları oluştur
-    for order_idx, market_id in enumerate(payload.market_ids):
+    for order_idx, market_id in enumerate(unique_market_ids):
         stop = RouteStop(
             route_id=route.id,
             market_id=market_id,
@@ -602,6 +676,12 @@ async def reorder_today_route(
     if not pending_stops:
         return await _build_route_out(route.id, db)
 
+    # GPS koordinatlarını doğrula (Antalya sınırları: lat 35-38.5, lng 29-33.5)
+    lat = payload.current_lat
+    lng = payload.current_lng
+    if not (35.0 <= lat <= 38.5 and 29.0 <= lng <= 33.5):
+        lat, lng = 36.8969, 30.7133
+
     # Bekleyen durakların market koordinatlarını çek
     pending_market_ids = [s.market_id for s in pending_stops]
 
@@ -621,12 +701,12 @@ async def reorder_today_route(
 
     pending_with_coords: list[tuple[RouteStop, float, float]] = []
     for stop in pending_stops:
-        lat, lng = coord_map.get(stop.market_id, (0.0, 0.0))
-        pending_with_coords.append((stop, lat, lng))
+        stop_lat, stop_lng = coord_map.get(stop.market_id, (0.0, 0.0))
+        pending_with_coords.append((stop, stop_lat, stop_lng))
 
     # Nearest Neighbor ile sırala
-    coords_only = [(s.market_id, lat, lng) for s, lat, lng in pending_with_coords]
-    sorted_coords = _osrm_sort_route(coords_only, payload.current_lat, payload.current_lng)
+    coords_only = [(s.market_id, stop_lat, stop_lng) for s, stop_lat, stop_lng in pending_with_coords]
+    sorted_coords = _osrm_sort_route(coords_only, lat, lng)
     sorted_market_ids = [c[0] for c in sorted_coords]
 
     # Yeni order_index ata
@@ -857,3 +937,25 @@ async def _build_route_out(route_id: UUID, db: AsyncSession) -> DailyRouteOut:
         total_duration=total_duration,
         polyline=polyline,
     )
+
+
+@router.delete("/{route_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_daily_route_endpoint(
+    route_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Belirtilen günlük rotayı siler (RouteStop'lar ON DELETE CASCADE ile otomatik olarak silinir).
+    Sadece admin veya manager yapabilir.
+    """
+    if current_user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Yetkiniz yok")
+
+    result = await db.execute(select(DailyRoute).where(DailyRoute.id == route_id))
+    route = result.scalar_one_or_none()
+    if not route:
+        raise HTTPException(status_code=404, detail="Rota bulunamadı")
+
+    await db.execute(delete(DailyRoute).where(DailyRoute.id == route_id))
+    await db.commit()

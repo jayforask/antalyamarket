@@ -244,18 +244,31 @@ def rollover_unvisited_stops(self, target_date_str: str = None):
                 )
                 existing_stops = existing_stops_result.scalars().all()
 
-                # 3. Bugünün sarkan duraklarını yeni nesne olarak hazırla
+                # 3. Bugünün sarkan duraklarını yeni nesne olarak hazırla (mükerrer olmasın)
                 new_stops = []
+                existing_market_ids = {s.market_id for s in existing_stops}
                 for stop in user_leftovers:
-                    new_stop = RouteStop(
-                        route_id=next_route.id,
-                        market_id=stop.market_id,
-                        status="rolled_over",
-                        rolled_from_date=today,
-                        rollover_count=(stop.rollover_count or 0) + 1,
-                    )
-                    new_stops.append(new_stop)
                     stop.status = "rolled_over"  # Bugününkini güncelliyoruz
+                    
+                    # Eğer yarının rotasında bu market zaten varsa, mükerrer durak ekleme!
+                    # Bunun yerine yarındaki mevcut durağın rollover sayacını güncelleyebiliriz.
+                    if stop.market_id in existing_market_ids:
+                        for es in existing_stops:
+                            if es.market_id == stop.market_id:
+                                es.status = "rolled_over"
+                                es.rolled_from_date = today
+                                es.rollover_count = max(es.rollover_count or 0, (stop.rollover_count or 0) + 1)
+                                break
+                    else:
+                        new_stop = RouteStop(
+                            route_id=next_route.id,
+                            market_id=stop.market_id,
+                            status="rolled_over",
+                            rolled_from_date=today,
+                            rollover_count=(stop.rollover_count or 0) + 1,
+                        )
+                        new_stops.append(new_stop)
+                        existing_market_ids.add(stop.market_id)
 
                 # Tüm adayları birleştir (öncelik sarkanlarda)
                 all_candidates = new_stops + existing_stops

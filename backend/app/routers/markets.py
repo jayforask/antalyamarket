@@ -24,7 +24,7 @@ async def search_markets(
     is_verified: Optional[bool] = Query(None),
     is_corporate: Optional[bool] = Query(None, description="Kurumsal filtresi"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=10000),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):

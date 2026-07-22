@@ -395,6 +395,9 @@ async def _reorder_route_by_gps(
     Bugünkü rotadaki pending/rolled_over durakları GPS konumuna göre sırala.
     Vardiya başlatılırken çağrılır — kullanıcıya rota optimize edilmiş olarak gösterilir.
     """
+    if not (35.0 <= current_lat <= 38.5 and 29.0 <= current_lng <= 33.5):
+        current_lat, current_lng = 36.8969, 30.7133
+
     today = date.today()
     result = await db.execute(
         select(DailyRoute).where(
